@@ -24,43 +24,33 @@ const TOOL_SCHEMA = {
   type: "function" as const,
   function: {
     name: "vocal_decision",
-    description: "Return the complete vocal processing decision based on spectral analysis data.",
+    description: "Return the complete vocal processing decision. You MUST populate ALL fields with real values based on the analysis data. Do NOT return empty arguments.",
     parameters: {
       type: "object",
       properties: {
-        issueProfile: { type: "string", description: "Brief description of detected issues" },
-        severity: { type: "string", enum: ["low", "moderate", "high"] },
-        confidence: { type: "number", description: "0-100 confidence in the decision" },
-        styleTarget: { type: "string" },
-        styleInterpretation: { type: "string", description: "How style target was balanced with findings" },
-        strategy: { type: "string", enum: ["de_ess_focused", "eq_focused", "balanced", "minimal_intervention", "multi_pass"] },
-        processingOrder: { type: "string", description: "Order of DSP operations" },
-        passCount: { type: "number", enum: [1, 2] },
-        tradeoffPriority: { type: "string", description: "What was prioritized in tradeoff decisions" },
-        artifactRiskPrediction: { type: "string", enum: ["low", "moderate", "high"] },
-        eqBellCenterHz: { type: "number", description: "Center frequency of primary harshness EQ bell cut (Hz)" },
-        eqBellQ: { type: "number", description: "Q factor for primary EQ bell" },
-        eqBellCutDb: { type: "number", description: "Gain reduction in dB (negative number)" },
-        optionalSecondEqBellCenterHz: { type: "number", description: "Optional second EQ bell center frequency" },
-        optionalSecondEqBellQ: { type: "number" },
-        optionalSecondEqBellCutDb: { type: "number" },
-        optionalHighShelfCutDb: { type: "number", description: "Optional high shelf reduction in dB" },
-        optionalPresenceCompensationDb: { type: "number", description: "Optional presence boost to compensate cuts" },
-        deEssMode: { type: "string", enum: ["narrow", "wide", "off"] },
-        deEssCenterHz: { type: "number", description: "De-esser center frequency (Hz)" },
-        deEssReductionDb: { type: "number", description: "De-esser attenuation in dB (negative number)" },
-        outputTrimDb: { type: "number", description: "Output level adjustment in dB" },
-        reportSummary: { type: "string", description: "2-3 sentence plain English summary of what was found and what will be done" },
-        reportReasoning: { type: "string", description: "Detailed reasoning referencing actual measurements, explaining strategy choice, tradeoff priority, and safety considerations" },
+        issueProfile: { type: "string", description: "Brief description of detected issues (e.g. 'moderate harshness at 4kHz, high sibilance bursts')" },
+        severity: { type: "string", description: "Overall severity: low, moderate, or high" },
+        confidence: { type: "number", description: "0-100 confidence in this decision" },
+        strategy: { type: "string", description: "One of: de_ess_focused, eq_focused, balanced, minimal_intervention, multi_pass" },
+        passCount: { type: "number", description: "Number of processing passes: 1 or 2" },
+        tradeoffPriority: { type: "string", description: "What was prioritized (e.g. 'safety over brightness')" },
+        artifactRiskPrediction: { type: "string", description: "Artifact risk: low, moderate, or high" },
+        eqBellCenterHz: { type: "number", description: "Primary EQ bell center frequency in Hz (e.g. 3500)" },
+        eqBellQ: { type: "number", description: "Q factor for EQ bell (e.g. 1.5)" },
+        eqBellCutDb: { type: "number", description: "EQ bell gain cut in dB, negative (e.g. -3.5)" },
+        deEssMode: { type: "string", description: "De-ess mode: narrow, wide, or off" },
+        deEssCenterHz: { type: "number", description: "De-esser center frequency in Hz (e.g. 7000)" },
+        deEssReductionDb: { type: "number", description: "De-esser reduction in dB, negative (e.g. -4.0)" },
+        outputTrimDb: { type: "number", description: "Output trim in dB (e.g. -0.5)" },
+        optionalSecondEqBellCenterHz: { type: "number", description: "Optional 2nd EQ center Hz, 0 if not used" },
+        optionalSecondEqBellQ: { type: "number", description: "Optional 2nd EQ Q, 0 if not used" },
+        optionalSecondEqBellCutDb: { type: "number", description: "Optional 2nd EQ cut dB, 0 if not used" },
+        optionalHighShelfCutDb: { type: "number", description: "Optional high shelf cut dB, 0 if not used" },
+        optionalPresenceCompensationDb: { type: "number", description: "Optional presence compensation dB, 0 if not used" },
+        reportSummary: { type: "string", description: "2-3 sentence plain English summary" },
+        reportReasoning: { type: "string", description: "Detailed reasoning referencing measurements and explaining tradeoffs" },
       },
-      required: [
-        "issueProfile", "severity", "confidence", "styleTarget", "styleInterpretation",
-        "strategy", "processingOrder", "passCount", "tradeoffPriority", "artifactRiskPrediction",
-        "eqBellCenterHz", "eqBellQ", "eqBellCutDb",
-        "deEssMode", "deEssCenterHz", "deEssReductionDb",
-        "outputTrimDb", "reportSummary", "reportReasoning"
-      ],
-      additionalProperties: false,
+      required: ["issueProfile", "severity", "confidence", "strategy", "eqBellCenterHz", "eqBellQ", "eqBellCutDb", "deEssMode", "deEssCenterHz", "deEssReductionDb", "outputTrimDb", "reportSummary", "reportReasoning"],
     },
   },
 };
@@ -159,11 +149,26 @@ serve(async (req) => {
     }
 
     const data = await response.json();
+    console.log("Gemini raw response:", JSON.stringify(data).slice(0, 2000));
 
     // Extract tool call result
     const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
     if (!toolCall || toolCall.function.name !== "vocal_decision") {
-      console.error("No valid tool call in response:", JSON.stringify(data));
+      // Fallback: check if the model returned content directly instead of a tool call
+      const content = data.choices?.[0]?.message?.content;
+      if (content) {
+        console.log("Model returned content instead of tool call, attempting JSON parse");
+        try {
+          const parsed = JSON.parse(content);
+          return new Response(
+            JSON.stringify({ decision: parsed, modelUsed }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        } catch {
+          // not JSON content
+        }
+      }
+      console.error("No valid tool call in response:", JSON.stringify(data).slice(0, 2000));
       return new Response(
         JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned an unexpected response format. No tool call found." }),
         { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -171,12 +176,23 @@ serve(async (req) => {
     }
 
     let decision;
+    const rawArgs = toolCall.function.arguments;
+    console.log("Tool call arguments type:", typeof rawArgs, "length:", String(rawArgs).length);
     try {
-      decision = JSON.parse(toolCall.function.arguments);
+      decision = typeof rawArgs === "object" ? rawArgs : JSON.parse(rawArgs);
     } catch (e) {
-      console.error("Failed to parse tool call arguments:", toolCall.function.arguments);
+      console.error("Failed to parse tool call arguments:", String(rawArgs).slice(0, 500));
       return new Response(
         JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned malformed tool call arguments." }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate decision has essential fields
+    if (!decision.eqBellCenterHz && !decision.reportSummary) {
+      console.error("Decision object is empty or missing key fields:", JSON.stringify(decision).slice(0, 500));
+      return new Response(
+        JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned an empty decision. Please try again." }),
         { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
