@@ -1,5 +1,5 @@
 import type { LayerOneAnalysis, GeminiDecision, PostRenderScore } from "@/types/gemini";
-import { AlertTriangle, CheckCircle, Info, Brain, BarChart3, Shield, Sparkles } from "lucide-react";
+import { AlertTriangle, CheckCircle, Info, Brain, BarChart3, Shield, Sparkles, Activity } from "lucide-react";
 
 interface AnalysisReportProps {
   analysis?: LayerOneAnalysis;
@@ -37,6 +37,87 @@ function Section({ icon: Icon, title, children }: { icon: typeof Info; title: st
   );
 }
 
+interface HeatmapBand {
+  label: string;
+  rangeLabel: string;
+  score: number | null; // null = N/A
+  logWidth: number; // proportional flex width based on log scale
+}
+
+function getHeatmapBands(analysis: LayerOneAnalysis): HeatmapBand[] {
+  return [
+    { label: "Mud", rangeLabel: "200–500 Hz", score: null, logWidth: 1.32 },       // log10(500)-log10(200)
+    { label: "Box", rangeLabel: "500–1k Hz", score: null, logWidth: 0.30 },        // log10(1000)-log10(500)
+    { label: "Nasal", rangeLabel: "800–1.5k Hz", score: null, logWidth: 0.27 },    // log10(1500)-log10(800)
+    { label: "Harsh", rangeLabel: "2–5 kHz", score: analysis.globalHarshness, logWidth: 0.40 },
+    { label: "Sibilance", rangeLabel: "5–10 kHz", score: analysis.globalSibilance, logWidth: 0.30 },
+  ];
+}
+
+function bandColor(score: number | null): string {
+  if (score === null) return "bg-muted";
+  if (score > 60) return "bg-destructive";
+  if (score >= 35) return "bg-accent";
+  return "bg-primary";
+}
+
+function bandTextColor(score: number | null): string {
+  if (score === null) return "text-muted-foreground";
+  if (score > 60) return "text-destructive";
+  if (score >= 35) return "text-accent";
+  return "text-primary";
+}
+
+function IssueHeatmap({ analysis }: { analysis: LayerOneAnalysis }) {
+  const bands = getHeatmapBands(analysis);
+  const totalWidth = bands.reduce((s, b) => s + b.logWidth, 0);
+
+  return (
+    <div className="space-y-2">
+      {/* Bar */}
+      <div className="flex h-5 w-full overflow-hidden rounded-md">
+        {bands.map((band) => (
+          <div
+            key={band.label}
+            className={`${bandColor(band.score)} transition-colors duration-500 relative group`}
+            style={{ flex: band.logWidth / totalWidth }}
+            title={`${band.label} (${band.rangeLabel}): ${band.score !== null ? `${band.score}/100` : "N/A — expanded analysis needed"}`}
+          >
+            <span className="absolute inset-0 flex items-center justify-center text-[8px] font-semibold uppercase tracking-wider opacity-0 group-hover:opacity-100 transition-opacity text-primary-foreground select-none">
+              {band.label}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* Frequency ticks */}
+      <div className="flex justify-between text-[8px] font-mono text-muted-foreground px-0.5">
+        <span>200</span><span>500</span><span>1k</span><span>2k</span><span>5k</span><span>10k</span>
+      </div>
+
+      {/* Legend + band scores */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {bands.map((band) => (
+          <div key={band.label} className="flex items-center gap-1">
+            <div className={`h-2 w-2 rounded-full ${bandColor(band.score)}`} />
+            <span className={`text-[9px] font-mono ${bandTextColor(band.score)}`}>
+              {band.label} {band.score !== null ? band.score : "N/A"}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* Severity legend */}
+      <div className="flex items-center gap-3 text-[8px] text-muted-foreground">
+        <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-primary inline-block" /> Low</span>
+        <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-accent inline-block" /> Moderate</span>
+        <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-destructive inline-block" /> High</span>
+        <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-muted inline-block" /> N/A</span>
+      </div>
+    </div>
+  );
+}
+
 export function AnalysisReport({ analysis, decision, clampsApplied, postRenderScore, preferredVersion }: AnalysisReportProps) {
   const severity = decision?.severity || analysis?.harshnessSeverity || "low";
   const SeverityIcon = severity === "high" ? AlertTriangle : severity === "moderate" ? Info : CheckCircle;
@@ -61,6 +142,16 @@ export function AnalysisReport({ analysis, decision, clampsApplied, postRenderSc
             <ScoreBar label="Harshness" value={analysis.globalHarshness} />
             <ScoreBar label="Sibilance" value={analysis.globalSibilance} />
           </div>
+
+          {/* Issue Heatmap */}
+          <div className="mt-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+              <h4 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Issue Heatmap</h4>
+            </div>
+            <IssueHeatmap analysis={analysis} />
+          </div>
+
           <div className="grid grid-cols-3 gap-2 mt-3">
             <div className="rounded-md bg-secondary/50 p-2">
               <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Peak</p>
