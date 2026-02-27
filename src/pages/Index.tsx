@@ -107,7 +107,7 @@ const Index = () => {
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="lg:col-span-2 space-y-6">
             {/* Analysis Report */}
-            {(analysis || geminiDecision) && (
+            {geminiDecision && (
               <AnalysisReport
                 analysis={analysis || undefined}
                 decision={geminiDecision || undefined}
