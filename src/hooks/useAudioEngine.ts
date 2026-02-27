@@ -12,10 +12,12 @@ import type {
   GeminiError,
 } from "@/types/gemini";
 import { analyzeAudio } from "@/lib/audioAnalysis";
-import { callGemini } from "@/lib/geminiClient";
+import { callGemini, clearBase64Cache } from "@/lib/geminiClient";
 import { applySafetyClamps } from "@/lib/safetyClamps";
 import { renderWithDecision } from "@/lib/dspEngine";
 import { validateRender } from "@/lib/postRenderValidation";
+
+const MAX_DURATION_SECONDS = 300; // 5 minutes
 
 export function useAudioEngine() {
   const [status, setStatus] = useState<AppStatus>("idle");
@@ -38,6 +40,7 @@ export function useAudioEngine() {
   const loadFile = useCallback((file: File) => {
     if (originalUrl) URL.revokeObjectURL(originalUrl);
     versions.forEach((v) => URL.revokeObjectURL(v.url));
+    clearBase64Cache();
 
     setOriginalFile(file);
     setOriginalUrl(URL.createObjectURL(file));
@@ -71,10 +74,17 @@ export function useAudioEngine() {
       return;
     }
 
-    // Layer 2: Gemini
+    // Duration check
+    if (layerOne.durationSeconds > MAX_DURATION_SECONDS) {
+      toast.error("Audio exceeds 5 minute limit. Please trim.");
+      setStatus("idle");
+      return;
+    }
+
+    // Layer 2: Gemini (now with audio file)
     setStatus("calling_gemini");
     try {
-      const result = await callGemini(layerOne, mode, styleTarget);
+      const result = await callGemini(originalFile, layerOne, mode, styleTarget);
       if (result.error) {
         console.error("Gemini error:", result.error);
         setGeminiError(result.error);
@@ -111,13 +121,7 @@ export function useAudioEngine() {
       const label = versions.length === 0 ? "AI Version A" : `Revision ${versions.length}`;
 
       const newVersion: ProcessedVersion = {
-        id: versionId,
-        label,
-        blob,
-        url,
-        buffer,
-        decision: clamped,
-        clampsApplied: clamps,
+        id: versionId, label, blob, url, buffer, decision: clamped, clampsApplied: clamps,
       };
 
       setVersions((prev) => [...prev, newVersion]);
@@ -125,10 +129,10 @@ export function useAudioEngine() {
       setStatus("playback_ready");
       toast.success(`${label} rendered`);
 
-      // Post-render validation async
+      // Post-render validation
       setStatus("validating");
       try {
-        const score = await validateRender(analysis!, buffer, versionId);
+        const score = await validateRender(analysis!, buffer, versionId, clamped.eqBellCenterHz);
         setPostRenderScores((prev) => ({ ...prev, [versionId]: score }));
       } catch (e) {
         console.error("Post-render validation failed:", e);
@@ -147,7 +151,7 @@ export function useAudioEngine() {
 
     setStatus("calling_gemini");
     try {
-      const result = await callGemini(analysis, mode, styleTarget, token, geminiDecision);
+      const result = await callGemini(originalFile, analysis, mode, styleTarget, token, geminiDecision);
       if (result.error) {
         toast.error(result.error.details || "Gemini feedback call failed");
         setStatus("ready");
@@ -179,7 +183,7 @@ export function useAudioEngine() {
       // Async validation
       setStatus("validating");
       try {
-        const score = await validateRender(analysis, buffer, versionId);
+        const score = await validateRender(analysis, buffer, versionId, clamped.eqBellCenterHz);
         setPostRenderScores((prev) => ({ ...prev, [versionId]: score }));
       } catch (e) {
         console.error("Post-render validation failed:", e);
@@ -202,25 +206,12 @@ export function useAudioEngine() {
   }, [currentVersion, originalFile]);
 
   return {
-    status,
-    mode, setMode,
-    styleTarget, setStyleTarget,
-    originalFile,
-    originalUrl,
-    analysis,
-    geminiDecision,
-    modelUsed,
-    geminiError,
-    clampsApplied,
-    versions,
-    currentVersionId, setCurrentVersionId,
-    currentVersion,
-    postRenderScores,
-    feedbackHistory,
-    loadFile,
-    analyze,
-    autoFix,
-    sendFeedback,
-    exportFile,
+    status, mode, setMode, styleTarget, setStyleTarget,
+    originalFile, originalUrl, analysis,
+    geminiDecision, modelUsed, geminiError,
+    clampsApplied, versions,
+    currentVersionId, setCurrentVersionId, currentVersion,
+    postRenderScores, feedbackHistory,
+    loadFile, analyze, autoFix, sendFeedback, exportFile,
   };
 }

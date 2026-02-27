@@ -68,6 +68,10 @@ export interface LayerOneAnalysis {
 
 // ── Gemini Decision ──
 export interface GeminiDecision {
+  // Unified report — REQUIRED
+  unifiedReport: string;
+  audioReceived: boolean;
+
   issueProfile: string;
   severity: string;
   confidence: number;
@@ -93,9 +97,6 @@ export interface GeminiDecision {
   deEssReductionDb: number;
   // Output
   outputTrimDb: number;
-  // Reporting
-  reportSummary: string;
-  reportReasoning: string;
   // Alternate
   alternateDecision?: GeminiDecision;
 }
@@ -124,6 +125,7 @@ export interface PostRenderScore {
   brightnessPreservation: number;
   artifactRiskEstimate: string;
   overallScore: number;
+  targetedBandDeltaDb: number;
 }
 
 export interface GeminiError {

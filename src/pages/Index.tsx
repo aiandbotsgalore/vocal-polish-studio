@@ -130,12 +130,14 @@ const Index = () => {
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="lg:col-span-2 space-y-6">
             {/* Analysis Report */}
-            {geminiDecision && (
+            {(analysis || geminiDecision || geminiError) && (
               <AnalysisReport
                 analysis={analysis || undefined}
                 decision={geminiDecision || undefined}
                 clampsApplied={clampsApplied}
                 postRenderScore={currentVersionId ? postRenderScores[currentVersionId] : undefined}
+                geminiError={geminiError}
+                modelUsed={modelUsed}
               />
             )}
 

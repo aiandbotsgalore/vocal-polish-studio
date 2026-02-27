@@ -5,7 +5,22 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-const SYSTEM_PROMPT = `You are a professional Audio Engineer with deep expertise in vocal processing. You receive Layer 1 spectral analysis data in JSON format — NOT raw audio. Do not ask for the audio file. Instead, interpret the measurements (harshness scores, sibilance scores, band energy ratios, segment timelines, burstiness, brightness consistency, peak levels, RMS loudness) to determine optimal DSP parameters for the given style target.
+const ALLOWED_MIME_TYPES = ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"];
+const MAX_BASE64_LENGTH = 14_000_000; // ~10.5 MB raw
+const MIN_BASE64_LENGTH = 2000;
+
+const PRIMARY_MODEL = "gemini-3.1-pro-preview";
+const FALLBACK_MODEL = "gemini-3-pro-preview";
+const TIMEOUT_MS = 20_000;
+
+const SYSTEM_PROMPT = `You are a professional Audio Engineer with deep expertise in vocal processing. You are receiving BOTH spectral analysis metrics AND the actual audio file. Listen to the audio.
+
+You must reference at least one directly audible characteristic of the audio (e.g., whisper tone, room echo, sharp S sounds, plosives, dynamic jumps). If no audio is present, set audioReceived to false.
+
+Return unifiedReport as a cohesive narrative that weaves numeric metrics with audible observations. Do not separate measurements from interpretation.
+
+Explain what you intentionally did NOT change and why.
+If safety clamps will apply, mention the tradeoff in unifiedReport.
 
 CONFLICT RESOLUTION POLICY (in priority order):
 1. Safety and artifact prevention — always highest priority
@@ -17,73 +32,82 @@ REASONING REQUIREMENTS:
 - Be specific: reference actual measurement values from the analysis
 - Explain WHY you chose each parameter value
 - State what tradeoff you prioritized and why
-- If you apply conservative settings, explain which measurements drove that decision
 - Never use generic phrases like "improved clarity" or "applied enhancements"`;
 
 const TOOL_SCHEMA = {
-  type: "function" as const,
-  function: {
-    name: "vocal_decision",
-    description: "Return the complete vocal processing decision. You MUST populate ALL fields with real values based on the analysis data. Do NOT return empty arguments.",
-    parameters: {
-      type: "object",
-      properties: {
-        issueProfile: { type: "string", description: "Brief description of detected issues (e.g. 'moderate harshness at 4kHz, high sibilance bursts')" },
-        severity: { type: "string", description: "Overall severity: low, moderate, or high" },
-        confidence: { type: "number", description: "0-100 confidence in this decision" },
-        strategy: { type: "string", description: "One of: de_ess_focused, eq_focused, balanced, minimal_intervention, multi_pass" },
-        passCount: { type: "number", description: "Number of processing passes: 1 or 2" },
-        tradeoffPriority: { type: "string", description: "What was prioritized (e.g. 'safety over brightness')" },
-        artifactRiskPrediction: { type: "string", description: "Artifact risk: low, moderate, or high" },
-        eqBellCenterHz: { type: "number", description: "Primary EQ bell center frequency in Hz (e.g. 3500)" },
-        eqBellQ: { type: "number", description: "Q factor for EQ bell (e.g. 1.5)" },
-        eqBellCutDb: { type: "number", description: "EQ bell gain cut in dB, negative (e.g. -3.5)" },
-        deEssMode: { type: "string", description: "De-ess mode: narrow, wide, or off" },
-        deEssCenterHz: { type: "number", description: "De-esser center frequency in Hz (e.g. 7000)" },
-        deEssReductionDb: { type: "number", description: "De-esser reduction in dB, negative (e.g. -4.0)" },
-        outputTrimDb: { type: "number", description: "Output trim in dB (e.g. -0.5)" },
-        optionalSecondEqBellCenterHz: { type: "number", description: "Optional 2nd EQ center Hz, 0 if not used" },
-        optionalSecondEqBellQ: { type: "number", description: "Optional 2nd EQ Q, 0 if not used" },
-        optionalSecondEqBellCutDb: { type: "number", description: "Optional 2nd EQ cut dB, 0 if not used" },
-        optionalHighShelfCutDb: { type: "number", description: "Optional high shelf cut dB, 0 if not used" },
-        optionalPresenceCompensationDb: { type: "number", description: "Optional presence compensation dB, 0 if not used" },
-        reportSummary: { type: "string", description: "2-3 sentence plain English summary" },
-        reportReasoning: { type: "string", description: "Detailed reasoning referencing measurements and explaining tradeoffs" },
-      },
-      required: ["issueProfile", "severity", "confidence", "strategy", "eqBellCenterHz", "eqBellQ", "eqBellCutDb", "deEssMode", "deEssCenterHz", "deEssReductionDb", "outputTrimDb", "reportSummary", "reportReasoning"],
+  name: "vocal_decision",
+  description: "Return the complete vocal processing decision with unified report. ALL fields must be populated.",
+  parameters: {
+    type: "OBJECT",
+    properties: {
+      unifiedReport: { type: "STRING", description: "Cohesive narrative weaving numeric metrics with audible observations. Must reference at least one audible trait." },
+      audioReceived: { type: "BOOLEAN", description: "True if you received and listened to the audio file. False if audio was not present." },
+      issueProfile: { type: "STRING", description: "Brief description of detected issues" },
+      severity: { type: "STRING", description: "Overall severity: low, moderate, or high" },
+      confidence: { type: "NUMBER", description: "0-100 confidence in this decision" },
+      styleTarget: { type: "STRING", description: "The style target applied" },
+      styleInterpretation: { type: "STRING", description: "How the style target influenced the decision" },
+      strategy: { type: "STRING", description: "One of: de_ess_focused, eq_focused, balanced, minimal_intervention, multi_pass" },
+      processingOrder: { type: "STRING", description: "Order of processing steps applied" },
+      passCount: { type: "NUMBER", description: "Number of processing passes: 1 or 2" },
+      tradeoffPriority: { type: "STRING", description: "What was prioritized" },
+      artifactRiskPrediction: { type: "STRING", description: "Artifact risk: low, moderate, or high" },
+      eqBellCenterHz: { type: "NUMBER", description: "Primary EQ bell center frequency in Hz" },
+      eqBellQ: { type: "NUMBER", description: "Q factor for EQ bell" },
+      eqBellCutDb: { type: "NUMBER", description: "EQ bell gain cut in dB, negative" },
+      deEssMode: { type: "STRING", description: "De-ess mode: narrow, wide, or off" },
+      deEssCenterHz: { type: "NUMBER", description: "De-esser center frequency in Hz" },
+      deEssReductionDb: { type: "NUMBER", description: "De-esser reduction in dB, negative" },
+      outputTrimDb: { type: "NUMBER", description: "Output trim in dB" },
+      optionalSecondEqBellCenterHz: { type: "NUMBER", description: "Optional 2nd EQ center Hz, 0 if not used" },
+      optionalSecondEqBellQ: { type: "NUMBER", description: "Optional 2nd EQ Q, 0 if not used" },
+      optionalSecondEqBellCutDb: { type: "NUMBER", description: "Optional 2nd EQ cut dB, 0 if not used" },
+      optionalHighShelfCutDb: { type: "NUMBER", description: "Optional high shelf cut dB, 0 if not used" },
+      optionalPresenceCompensationDb: { type: "NUMBER", description: "Optional presence compensation dB, 0 if not used" },
     },
+    required: [
+      "unifiedReport", "audioReceived", "issueProfile", "severity", "confidence",
+      "styleTarget", "styleInterpretation", "strategy", "processingOrder", "passCount",
+      "tradeoffPriority", "artifactRiskPrediction",
+      "eqBellCenterHz", "eqBellQ", "eqBellCutDb",
+      "deEssMode", "deEssCenterHz", "deEssReductionDb", "outputTrimDb",
+    ],
   },
 };
 
-function getApiConfig(): { baseUrl: string; apiKey: string; modelPrefix: string } {
-  const googleKey = Deno.env.get("GOOGLE_API_KEY");
-  if (googleKey) {
-    return {
-      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-      apiKey: googleKey,
-      modelPrefix: "",
-    };
-  }
-  const lovableKey = Deno.env.get("LOVABLE_API_KEY");
-  if (lovableKey) {
-    return {
-      baseUrl: "https://ai.gateway.lovable.dev/v1/chat/completions",
-      apiKey: lovableKey,
-      modelPrefix: "google/",
-    };
-  }
-  throw new Error("No API key configured (GOOGLE_API_KEY or LOVABLE_API_KEY)");
-}
+const REQUIRED_FIELDS = [
+  "unifiedReport", "audioReceived", "issueProfile", "strategy", "processingOrder",
+  "eqBellCenterHz", "eqBellQ", "eqBellCutDb", "deEssMode", "deEssCenterHz", "deEssReductionDb",
+];
 
-async function callModel(model: string, apiKey: string, baseUrl: string, body: any): Promise<Response> {
-  return await fetch(baseUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ ...body, model }),
-  });
+async function callGeminiNative(
+  model: string,
+  apiKey: string,
+  contents: any[],
+): Promise<Response> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  try {
+    return await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        contents,
+        tools: [{ functionDeclarations: [TOOL_SCHEMA] }],
+        toolConfig: {
+          functionCallingConfig: {
+            mode: "ANY",
+            allowedFunctionNames: ["vocal_decision"],
+          },
+        },
+      }),
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 serve(async (req) => {
@@ -92,144 +116,168 @@ serve(async (req) => {
   }
 
   try {
-    const { analysis, mode, styleTarget, feedback, priorDecision } = await req.json();
-    let apiConfig;
-    try {
-      apiConfig = getApiConfig();
-    } catch (e) {
+    const { analysis, mode, styleTarget, feedback, priorDecision, audioBase64, audioMimeType } = await req.json();
+
+    // ── API Key ──
+    const apiKey = Deno.env.get("GOOGLE_API_KEY");
+    if (!apiKey) {
       return new Response(
-        JSON.stringify({ error: "gemini_unavailable", details: e.message }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: "gemini_unavailable", details: "GOOGLE_API_KEY not configured." }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
-    const { baseUrl, apiKey, modelPrefix } = apiConfig;
-    console.log("Using API endpoint:", baseUrl);
 
-    // Build user message
-    let userContent = `## Analysis Data\n\`\`\`json\n${JSON.stringify(analysis, null, 2)}\n\`\`\`\n\n`;
-    userContent += `## Settings\n- Mode: ${mode === "safe" ? "Safe (conservative, minimal intervention)" : "Unleashed (broad authority, aggressive allowed)"}\n`;
-    userContent += `- Style Target: ${styleTarget}\n`;
+    // ── Server-side validations ──
+    if (!audioBase64 || audioBase64.length < MIN_BASE64_LENGTH) {
+      return new Response(
+        JSON.stringify({ error: "invalid_payload", details: "Invalid audio payload received." }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+    if (audioBase64.length > MAX_BASE64_LENGTH) {
+      return new Response(
+        JSON.stringify({ error: "file_too_large", details: "Audio payload exceeds inline Gemini limits. Trim the clip or convert to shorter audio." }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+    if (!audioMimeType || !ALLOWED_MIME_TYPES.includes(audioMimeType)) {
+      return new Response(
+        JSON.stringify({ error: "unsupported_format", details: "Unsupported audio format. Upload WAV or MP3." }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // ── Build prompt text ──
+    let promptText = `${SYSTEM_PROMPT}\n\n## Analysis Data\n\`\`\`json\n${JSON.stringify(analysis, null, 2)}\n\`\`\`\n\n`;
+    promptText += `## Settings\n- Mode: ${mode === "safe" ? "Safe (conservative, minimal intervention)" : "Unleashed (broad authority, aggressive allowed)"}\n`;
+    promptText += `- Style Target: ${styleTarget}\n`;
 
     if (feedback) {
-      userContent += `\n## User Feedback on Previous Version\nFeedback: ${feedback}\nPlease adjust the decision accordingly while maintaining safety limits.\n`;
+      promptText += `\n## User Feedback on Previous Version\nFeedback: ${feedback}\nPlease adjust the decision accordingly while maintaining safety limits.\n`;
     }
     if (priorDecision) {
-      userContent += `\n## Prior Decision (for reference)\n\`\`\`json\n${JSON.stringify(priorDecision, null, 2)}\n\`\`\`\n`;
+      promptText += `\n## Prior Decision (for reference)\n\`\`\`json\n${JSON.stringify(priorDecision, null, 2)}\n\`\`\`\n`;
     }
 
-    const messages = [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: userContent },
+    // ── Gemini-native request ──
+    const contents = [
+      {
+        role: "user",
+        parts: [
+          { text: promptText },
+          { inlineData: { mimeType: audioMimeType, data: audioBase64 } },
+        ],
+      },
     ];
 
-    const body = {
-      messages,
-      tools: [TOOL_SCHEMA],
-      tool_choice: { type: "function", function: { name: "vocal_decision" } },
-    };
-
-    const PRIMARY_MODEL = `${modelPrefix}gemini-3-pro-preview`;
-    const FALLBACK_MODEL = `${modelPrefix}gemini-2.5-pro`;
-
-    // Try primary model
-    let response = await callModel(PRIMARY_MODEL, apiKey, baseUrl, body);
+    // ── Primary model ──
+    console.log(`Attempting primary model: ${PRIMARY_MODEL}`);
+    let response: Response;
     let modelUsed = PRIMARY_MODEL;
 
-    if (!response.ok) {
-      const status = response.status;
-      const errorText = await response.text();
-      console.error(`Primary model (${PRIMARY_MODEL}) failed: ${status}`, errorText);
-
-      if (status === 429) {
-        return new Response(
-          JSON.stringify({ error: "rate_limited", details: "Rate limit exceeded. Please wait a moment and try again." }),
-          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+    try {
+      response = await callGeminiNative(PRIMARY_MODEL, apiKey, contents);
+    } catch (e) {
+      if (e.name === "AbortError") {
+        console.error(`Primary model (${PRIMARY_MODEL}) timed out after ${TIMEOUT_MS}ms`);
+      } else {
+        console.error(`Primary model (${PRIMARY_MODEL}) fetch error:`, e);
       }
-      if (status === 402) {
-        return new Response(
-          JSON.stringify({ error: "payment_required", details: "AI usage credits exhausted. Please add credits in Settings → Workspace → Usage." }),
-          { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+      // Fall through to fallback
+      response = null as any;
+    }
+
+    if (!response || !response.ok) {
+      if (response) {
+        const errText = await response.text();
+        console.error(`Primary model (${PRIMARY_MODEL}) failed: ${response.status}`, errText);
       }
 
-      // Try fallback
-      console.log(`Retrying with fallback model: ${FALLBACK_MODEL}`);
-      response = await callModel(FALLBACK_MODEL, apiKey, baseUrl, body);
+      // ── Fallback model ──
+      console.log(`Attempting fallback model: ${FALLBACK_MODEL}`);
       modelUsed = FALLBACK_MODEL;
-
-      if (!response.ok) {
-        const fallbackError = await response.text();
-        console.error(`Fallback model (${FALLBACK_MODEL}) also failed: ${response.status}`, fallbackError);
+      try {
+        response = await callGeminiNative(FALLBACK_MODEL, apiKey, contents);
+      } catch (e) {
+        const reason = e.name === "AbortError" ? `timed out after ${TIMEOUT_MS}ms` : (e.message || "fetch error");
+        console.error(`Fallback model (${FALLBACK_MODEL}) failed:`, reason);
         return new Response(
           JSON.stringify({
             error: "gemini_unavailable",
-            details: `Gemini analysis failed. Primary model (${PRIMARY_MODEL}) returned ${status}. Fallback model (${FALLBACK_MODEL}) returned ${response.status}. No AI decision was generated. Please check your network connection or model availability and try again.`,
+            details: `Both models failed. Primary: ${PRIMARY_MODEL}, Fallback: ${FALLBACK_MODEL}. Last error: ${reason}`,
             model: FALLBACK_MODEL,
           }),
-          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`Fallback model (${FALLBACK_MODEL}) failed: ${response.status}`, errText);
+        return new Response(
+          JSON.stringify({
+            error: "gemini_unavailable",
+            details: `Both models failed. Fallback (${FALLBACK_MODEL}) returned ${response.status}.`,
+            model: FALLBACK_MODEL,
+          }),
+          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
     }
 
+    console.log(`Model used: ${modelUsed}, status: ${response.status}`);
     const data = await response.json();
     console.log("Gemini raw response:", JSON.stringify(data).slice(0, 2000));
 
-    // Extract tool call result
-    const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
-    if (!toolCall || toolCall.function.name !== "vocal_decision") {
-      // Fallback: check if the model returned content directly instead of a tool call
-      const content = data.choices?.[0]?.message?.content;
-      if (content) {
-        console.log("Model returned content instead of tool call, attempting JSON parse");
-        try {
-          const parsed = JSON.parse(content);
-          return new Response(
-            JSON.stringify({ decision: parsed, modelUsed }),
-            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        } catch {
-          // not JSON content
-        }
-      }
-      console.error("No valid tool call in response:", JSON.stringify(data).slice(0, 2000));
+    // ── Parse response — scan all parts for functionCall ──
+    const parts = data.candidates?.[0]?.content?.parts || [];
+    const fnPart = parts.find((p: any) => p.functionCall);
+
+    if (!fnPart) {
+      console.error("No functionCall found in response parts:", JSON.stringify(parts).slice(0, 1000));
       return new Response(
-        JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned an unexpected response format. No tool call found." }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned an unexpected response format. No function call found.", model: modelUsed }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
-    let decision;
-    const rawArgs = toolCall.function.arguments;
-    console.log("Tool call arguments type:", typeof rawArgs, "length:", String(rawArgs).length);
-    try {
-      decision = typeof rawArgs === "object" ? rawArgs : JSON.parse(rawArgs);
-    } catch (e) {
-      console.error("Failed to parse tool call arguments:", String(rawArgs).slice(0, 500));
+    const decision = fnPart.functionCall.args;
+    if (!decision || typeof decision !== "object") {
+      console.error("functionCall.args is empty or invalid:", JSON.stringify(fnPart).slice(0, 500));
       return new Response(
-        JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned malformed tool call arguments." }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned empty function call arguments.", model: modelUsed }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
-    // Validate decision has essential fields
-    if (!decision.eqBellCenterHz && !decision.reportSummary) {
-      console.error("Decision object is empty or missing key fields:", JSON.stringify(decision).slice(0, 500));
+    // ── Validate required fields ──
+    const missingFields = REQUIRED_FIELDS.filter((f) => decision[f] === undefined || decision[f] === null);
+    if (missingFields.length > 0) {
+      console.error("Missing required fields:", missingFields);
       return new Response(
-        JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned an empty decision. Please try again." }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: "gemini_incomplete", details: `Gemini returned incomplete decision. Missing: ${missingFields.join(", ")}`, model: modelUsed }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // ── audioReceived enforcement ──
+    if (decision.audioReceived === false) {
+      console.error("Gemini reports audioReceived=false");
+      return new Response(
+        JSON.stringify({ error: "audio_not_received", details: "Gemini did not receive audio input. Analysis invalid.", model: modelUsed }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
     return new Response(
       JSON.stringify({ decision, modelUsed }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (e) {
     console.error("gemini-vocal error:", e);
     return new Response(
       JSON.stringify({ error: "gemini_unavailable", details: e instanceof Error ? e.message : "Unknown server error" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
 });

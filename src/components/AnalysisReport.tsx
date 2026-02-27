@@ -1,5 +1,8 @@
-import type { LayerOneAnalysis, GeminiDecision, PostRenderScore } from "@/types/gemini";
-import { AlertTriangle, CheckCircle, Info, Brain, BarChart3, Shield, Sparkles, Activity } from "lucide-react";
+import { useState } from "react";
+import type { LayerOneAnalysis, GeminiDecision, PostRenderScore, GeminiError } from "@/types/gemini";
+import { AlertTriangle, CheckCircle, Info, Brain, BarChart3, Shield, Sparkles, Activity, ChevronDown, ChevronRight, Headphones, AlertCircle } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 
 interface AnalysisReportProps {
   analysis?: LayerOneAnalysis;
@@ -7,6 +10,8 @@ interface AnalysisReportProps {
   clampsApplied?: string[];
   postRenderScore?: PostRenderScore;
   preferredVersion?: string;
+  geminiError?: GeminiError | null;
+  modelUsed?: string;
 }
 
 function ScoreBar({ label, value, max = 100 }: { label: string; value: number; max?: number }) {
@@ -40,15 +45,15 @@ function Section({ icon: Icon, title, children }: { icon: typeof Info; title: st
 interface HeatmapBand {
   label: string;
   rangeLabel: string;
-  score: number | null; // null = N/A
-  logWidth: number; // proportional flex width based on log scale
+  score: number | null;
+  logWidth: number;
 }
 
 function getHeatmapBands(analysis: LayerOneAnalysis): HeatmapBand[] {
   return [
-    { label: "Mud", rangeLabel: "200–500 Hz", score: null, logWidth: 1.32 },       // log10(500)-log10(200)
-    { label: "Box", rangeLabel: "500–1k Hz", score: null, logWidth: 0.30 },        // log10(1000)-log10(500)
-    { label: "Nasal", rangeLabel: "800–1.5k Hz", score: null, logWidth: 0.27 },    // log10(1500)-log10(800)
+    { label: "Mud", rangeLabel: "200–500 Hz", score: null, logWidth: 1.32 },
+    { label: "Box", rangeLabel: "500–1k Hz", score: null, logWidth: 0.30 },
+    { label: "Nasal", rangeLabel: "800–1.5k Hz", score: null, logWidth: 0.27 },
     { label: "Harsh", rangeLabel: "2–5 kHz", score: analysis.globalHarshness, logWidth: 0.40 },
     { label: "Sibilance", rangeLabel: "5–10 kHz", score: analysis.globalSibilance, logWidth: 0.30 },
   ];
@@ -74,14 +79,13 @@ function IssueHeatmap({ analysis }: { analysis: LayerOneAnalysis }) {
 
   return (
     <div className="space-y-2">
-      {/* Bar */}
       <div className="flex h-5 w-full overflow-hidden rounded-md">
         {bands.map((band) => (
           <div
             key={band.label}
             className={`${bandColor(band.score)} transition-colors duration-500 relative group`}
             style={{ flex: band.logWidth / totalWidth }}
-            title={`${band.label} (${band.rangeLabel}): ${band.score !== null ? `${band.score}/100` : "N/A — expanded analysis needed"}`}
+            title={`${band.label} (${band.rangeLabel}): ${band.score !== null ? `${band.score}/100` : "N/A"}`}
           >
             <span className="absolute inset-0 flex items-center justify-center text-[8px] font-semibold uppercase tracking-wider opacity-0 group-hover:opacity-100 transition-opacity text-primary-foreground select-none">
               {band.label}
@@ -89,13 +93,9 @@ function IssueHeatmap({ analysis }: { analysis: LayerOneAnalysis }) {
           </div>
         ))}
       </div>
-
-      {/* Frequency ticks */}
       <div className="flex justify-between text-[8px] font-mono text-muted-foreground px-0.5">
         <span>200</span><span>500</span><span>1k</span><span>2k</span><span>5k</span><span>10k</span>
       </div>
-
-      {/* Legend + band scores */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         {bands.map((band) => (
           <div key={band.label} className="flex items-center gap-1">
@@ -106,8 +106,6 @@ function IssueHeatmap({ analysis }: { analysis: LayerOneAnalysis }) {
           </div>
         ))}
       </div>
-
-      {/* Severity legend */}
       <div className="flex items-center gap-3 text-[8px] text-muted-foreground">
         <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-primary inline-block" /> Low</span>
         <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-accent inline-block" /> Moderate</span>
@@ -118,13 +116,15 @@ function IssueHeatmap({ analysis }: { analysis: LayerOneAnalysis }) {
   );
 }
 
-export function AnalysisReport({ analysis, decision, clampsApplied, postRenderScore, preferredVersion }: AnalysisReportProps) {
+export function AnalysisReport({ analysis, decision, clampsApplied, postRenderScore, preferredVersion, geminiError, modelUsed }: AnalysisReportProps) {
+  const [rawMetricsOpen, setRawMetricsOpen] = useState(false);
   const severity = decision?.severity || analysis?.harshnessSeverity || "low";
   const SeverityIcon = severity === "high" ? AlertTriangle : severity === "moderate" ? Info : CheckCircle;
   const severityColor = severity === "high" ? "text-destructive" : severity === "moderate" ? "text-accent" : "text-primary";
 
   return (
     <div className="space-y-5 rounded-lg panel-gradient p-5 studio-border">
+      {/* Header */}
       <div className="flex items-center gap-2">
         <SeverityIcon className={`h-5 w-5 ${severityColor}`} />
         <h3 className="text-sm font-semibold text-foreground">Analysis Report</h3>
@@ -135,83 +135,122 @@ export function AnalysisReport({ analysis, decision, clampsApplied, postRenderSc
         }`}>{severity}</span>
       </div>
 
-      {/* Measured Findings */}
-      {analysis && (
-        <Section icon={BarChart3} title="Measured Findings">
-          <div className="grid gap-3">
-            <ScoreBar label="Harshness" value={analysis.globalHarshness} />
-            <ScoreBar label="Sibilance" value={analysis.globalSibilance} />
-          </div>
+      {/* Audio analysis source indicator */}
+      {decision && (
+        <div className="flex items-center gap-2">
+          {decision.audioReceived ? (
+            <Badge variant="default" className="gap-1 bg-primary/15 text-primary border-primary/30">
+              <Headphones className="h-3 w-3" />
+              Gemini Listening + Metrics
+            </Badge>
+          ) : (
+            <Badge variant="destructive" className="gap-1">
+              <AlertCircle className="h-3 w-3" />
+              Metrics Only (Audio Not Received)
+            </Badge>
+          )}
+          {modelUsed && (
+            <span className="text-[10px] font-mono text-muted-foreground">Model: {modelUsed}</span>
+          )}
+        </div>
+      )}
 
-          {/* Issue Heatmap */}
-          <div className="mt-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Activity className="h-3.5 w-3.5 text-muted-foreground" />
-              <h4 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Issue Heatmap</h4>
-            </div>
-            <IssueHeatmap analysis={analysis} />
+      {/* Gemini Error Display */}
+      {geminiError && (
+        <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 space-y-2">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-destructive" />
+            <span className="text-xs font-semibold text-destructive">Gemini Analysis Failed</span>
           </div>
+          {geminiError.model && (
+            <p className="text-[10px] font-mono text-muted-foreground">Model attempted: {geminiError.model}</p>
+          )}
+          <p className="text-xs text-destructive/80">{geminiError.details || geminiError.error}</p>
+          <p className="text-[10px] text-muted-foreground">Suggestions: Check your API key configuration, trim audio to under 5 minutes, or retry.</p>
+        </div>
+      )}
 
-          <div className="grid grid-cols-3 gap-2 mt-3">
-            <div className="rounded-md bg-secondary/50 p-2">
-              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Peak</p>
-              <p className="font-mono text-sm font-semibold text-foreground">{analysis.peakLevel}<span className="text-[10px] text-muted-foreground"> dB</span></p>
-            </div>
-            <div className="rounded-md bg-secondary/50 p-2">
-              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">RMS</p>
-              <p className="font-mono text-sm font-semibold text-foreground">{analysis.rmsLoudness}<span className="text-[10px] text-muted-foreground"> dB</span></p>
-            </div>
-            <div className="rounded-md bg-secondary/50 p-2">
-              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Brightness</p>
-              <p className="font-mono text-sm font-semibold text-foreground">{analysis.voiceBrightness}<span className="text-[10px] text-muted-foreground">%</span></p>
-            </div>
-            <div className="rounded-md bg-secondary/50 p-2">
-              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Harsh Center</p>
-              <p className="font-mono text-sm font-semibold text-foreground">{analysis.estimatedHarshnessCenterHz}<span className="text-[10px] text-muted-foreground"> Hz</span></p>
-            </div>
-            <div className="rounded-md bg-secondary/50 p-2">
-              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Burstiness</p>
-              <p className="font-mono text-sm font-semibold text-foreground">{analysis.burstinessScore}<span className="text-[10px] text-muted-foreground">/100</span></p>
-            </div>
-            <div className="rounded-md bg-secondary/50 p-2">
-              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Consistency</p>
-              <p className="font-mono text-sm font-semibold text-foreground">{analysis.brightnessConsistency}<span className="text-[10px] text-muted-foreground">%</span></p>
-            </div>
+      {/* Gemini Unified Analysis — Primary section */}
+      {decision?.unifiedReport && (
+        <Section icon={Brain} title="Gemini Analysis">
+          <div className="rounded-md bg-secondary/30 p-3">
+            <p className="text-xs leading-relaxed text-secondary-foreground whitespace-pre-line">{decision.unifiedReport}</p>
           </div>
         </Section>
       )}
 
-      {/* Gemini Interpretation */}
-      {decision && (
-        <>
-          <Section icon={Brain} title="Gemini Interpretation">
-            <div className="rounded-md bg-secondary/30 p-3">
-              <p className="text-xs leading-relaxed text-secondary-foreground">{decision.reportSummary}</p>
+      {/* Raw Measured Metrics — Collapsible */}
+      {analysis && (
+        <Collapsible open={rawMetricsOpen} onOpenChange={setRawMetricsOpen}>
+          <CollapsibleTrigger className="flex items-center gap-2 w-full text-left group">
+            {rawMetricsOpen ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
+            <BarChart3 className="h-3.5 w-3.5 text-muted-foreground" />
+            <h4 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground group-hover:text-foreground transition-colors">
+              Show Raw Metrics
+            </h4>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="mt-3 space-y-4">
+            <div className="grid gap-3">
+              <ScoreBar label="Harshness" value={analysis.globalHarshness} />
+              <ScoreBar label="Sibilance" value={analysis.globalSibilance} />
             </div>
-          </Section>
 
-          <Section icon={Sparkles} title="Chosen Strategy & Parameters">
-            <div className="rounded-md bg-secondary/30 p-3 space-y-2">
-              <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs font-mono text-secondary-foreground">
-                <span>Strategy:</span><span>{decision.strategy}</span>
-                <span>EQ Bell:</span><span>{decision.eqBellCenterHz}Hz, Q{decision.eqBellQ}, {decision.eqBellCutDb}dB</span>
-                {decision.optionalSecondEqBellCenterHz && (
-                  <><span>2nd Bell:</span><span>{decision.optionalSecondEqBellCenterHz}Hz, {decision.optionalSecondEqBellCutDb}dB</span></>
-                )}
-                <span>De-ess:</span><span>{decision.deEssCenterHz}Hz, {decision.deEssReductionDb}dB ({decision.deEssMode})</span>
-                {decision.optionalHighShelfCutDb && <><span>Hi Shelf:</span><span>{decision.optionalHighShelfCutDb}dB</span></>}
-                {decision.optionalPresenceCompensationDb && <><span>Pres Comp:</span><span>+{decision.optionalPresenceCompensationDb}dB</span></>}
-                <span>Output Trim:</span><span>{decision.outputTrimDb}dB</span>
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                <h4 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Issue Heatmap</h4>
+              </div>
+              <IssueHeatmap analysis={analysis} />
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              <div className="rounded-md bg-secondary/50 p-2">
+                <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Peak</p>
+                <p className="font-mono text-sm font-semibold text-foreground">{analysis.peakLevel}<span className="text-[10px] text-muted-foreground"> dB</span></p>
+              </div>
+              <div className="rounded-md bg-secondary/50 p-2">
+                <p className="text-[9px] uppercase tracking-wider text-muted-foreground">RMS</p>
+                <p className="font-mono text-sm font-semibold text-foreground">{analysis.rmsLoudness}<span className="text-[10px] text-muted-foreground"> dB</span></p>
+              </div>
+              <div className="rounded-md bg-secondary/50 p-2">
+                <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Brightness</p>
+                <p className="font-mono text-sm font-semibold text-foreground">{analysis.voiceBrightness}<span className="text-[10px] text-muted-foreground">%</span></p>
+              </div>
+              <div className="rounded-md bg-secondary/50 p-2">
+                <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Harsh Center</p>
+                <p className="font-mono text-sm font-semibold text-foreground">{analysis.estimatedHarshnessCenterHz}<span className="text-[10px] text-muted-foreground"> Hz</span></p>
+              </div>
+              <div className="rounded-md bg-secondary/50 p-2">
+                <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Burstiness</p>
+                <p className="font-mono text-sm font-semibold text-foreground">{analysis.burstinessScore}<span className="text-[10px] text-muted-foreground">/100</span></p>
+              </div>
+              <div className="rounded-md bg-secondary/50 p-2">
+                <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Consistency</p>
+                <p className="font-mono text-sm font-semibold text-foreground">{analysis.brightnessConsistency}<span className="text-[10px] text-muted-foreground">%</span></p>
               </div>
             </div>
-          </Section>
+          </CollapsibleContent>
+        </Collapsible>
+      )}
 
-          <Section icon={Info} title="Reasoning">
-            <div className="rounded-md bg-secondary/30 p-3">
-              <p className="text-xs leading-relaxed text-secondary-foreground whitespace-pre-line">{decision.reportReasoning}</p>
+      {/* Strategy & Parameters */}
+      {decision && (
+        <Section icon={Sparkles} title="Chosen Strategy & Parameters">
+          <div className="rounded-md bg-secondary/30 p-3 space-y-2">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs font-mono text-secondary-foreground">
+              <span>Strategy:</span><span>{decision.strategy}</span>
+              <span>Order:</span><span>{decision.processingOrder}</span>
+              <span>EQ Bell:</span><span>{decision.eqBellCenterHz}Hz, Q{decision.eqBellQ}, {decision.eqBellCutDb}dB</span>
+              {decision.optionalSecondEqBellCenterHz ? (
+                <><span>2nd Bell:</span><span>{decision.optionalSecondEqBellCenterHz}Hz, {decision.optionalSecondEqBellCutDb}dB</span></>
+              ) : null}
+              <span>De-ess:</span><span>{decision.deEssCenterHz}Hz, {decision.deEssReductionDb}dB ({decision.deEssMode})</span>
+              {decision.optionalHighShelfCutDb ? <><span>Hi Shelf:</span><span>{decision.optionalHighShelfCutDb}dB</span></> : null}
+              {decision.optionalPresenceCompensationDb ? <><span>Pres Comp:</span><span>+{decision.optionalPresenceCompensationDb}dB</span></> : null}
+              <span>Output Trim:</span><span>{decision.outputTrimDb}dB</span>
             </div>
-          </Section>
-        </>
+          </div>
+        </Section>
       )}
 
       {/* Safety Clamps */}
@@ -248,6 +287,19 @@ export function AnalysisReport({ analysis, decision, clampsApplied, postRenderSc
               <p className="font-mono text-sm font-semibold text-foreground">{postRenderScore.sibilanceReduction}%</p>
             </div>
           </div>
+          {/* Band energy delta warning */}
+          {postRenderScore.targetedBandDeltaDb !== undefined && Math.abs(postRenderScore.targetedBandDeltaDb) < 0.2 && (
+            <div className="mt-2 rounded-md border border-accent/30 bg-accent/5 p-2 flex items-start gap-2">
+              <AlertCircle className="h-3.5 w-3.5 text-accent mt-0.5 shrink-0" />
+              <p className="text-[10px] text-accent">Processing produced negligible audible change. DSP may not have applied.</p>
+            </div>
+          )}
+          {postRenderScore.targetedBandDeltaDb !== undefined && Math.abs(postRenderScore.targetedBandDeltaDb) >= 0.2 && (
+            <div className="mt-2 rounded-md bg-secondary/50 p-2">
+              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Band Delta</p>
+              <p className="font-mono text-sm font-semibold text-foreground">{postRenderScore.targetedBandDeltaDb}<span className="text-[10px] text-muted-foreground"> dB</span></p>
+            </div>
+          )}
           {preferredVersion && (
             <p className="text-xs text-primary mt-2">AI Preferred: <span className="font-semibold">{preferredVersion}</span></p>
           )}
