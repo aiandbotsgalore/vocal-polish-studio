@@ -1,54 +1,121 @@
 
 
-## Plan: Waveform A/B + Live Sliders + Soft Duration Limit
+## Plan: 12 Final Hardening Fixes to DSP Engine Architecture
 
-### Files to Create
-- `src/components/WaveformComparison.tsx` — Canvas waveform with A/B drag slider
-- `src/components/LiveSliders.tsx` — 4 DSP sliders with debounced re-render
+These are spec amendments to the approved plan. No new features — only precision fixes that prevent sonic/technical bugs.
 
-### Files to Modify
-- `src/hooks/useAudioEngine.ts` — remove hard 5-min block, add `renderWithOverrides()`, store original AudioBuffer, friendlier errors
-- `src/lib/dspEngine.ts` — add `renderWithOverrides()` accepting slider values that override decision params
-- `src/pages/Index.tsx` — wire up WaveformComparison and LiveSliders
-- `src/types/gemini.ts` — add `SliderOverrides` type
+### Fix 1: Complete LUFS Filter Chain in `src/lib/dsp/loudness.ts`
 
-### Technical Details
+The loudness measurement chain must be:
+1. **Stage 1 — High-shelf pre-filter**: +3.999dB at 1681.97Hz (BS.1770 head-related)
+2. **Stage 2 — RLB weighting filter**: high-pass at 38.135Hz (revised low-frequency)
+3. **Stage 3 — Energy integration**: per-block mean-square
+4. **Stage 4 — Gating**: absolute at -70 LUFS, relative at -10 LUFS
 
-**1. Waveform + A/B Slider**
+Both filters are biquad — use shared `biquad.ts` with exact BS.1770-4 coefficients. Without Stage 2, vocal LUFS can be 1-3dB wrong on bass-heavy recordings.
 
-Pure canvas component, no external dependency. Takes `originalBuffer: AudioBuffer | null` and `processedBuffer: AudioBuffer | null`. Draws both waveforms overlaid — original in gray (`hsl(215 15% 50%)`), processed in primary color. A draggable vertical line splits: left of line plays/shows original, right shows processed. The divider has a small pill handle. Uses `requestAnimationFrame` for smooth drag. Component is ~120 lines.
+### Fix 2: Lock DenoiseLite STFT Settings in Plugin
 
-Waveform rendering: downsample channel data to canvas width, draw min/max amplitude bars per pixel column. Original draws full width underneath, processed draws full width on top with clip region based on slider position.
+Hardcode in `src/lib/dsp/plugins/DenoiseLite.ts`:
+- FFT size: 2048
+- Hop size: 512 (75% overlap)
+- Window: Hann
+- Chunk processing size: 4096 samples per async yield
 
-**2. Live Sliders**
+These are not configurable params — they are internal constants.
 
-Four sliders appear after Auto Fix completes (when `currentVersion` exists). Each maps to a DSP parameter:
+### Fix 3: Median Smoothing Before Resonance Peak Detection
 
-| Slider | Range | Maps to |
-|--------|-------|---------|
-| Harshness Reduction | 0–100% | Scales `eqBellCutDb` (0% = 0dB, 100% = original AI value) |
-| Sibilance Reduction | 0–100% | Scales `deEssReductionDb` similarly |
-| Brightness / Air | -6 to +6 dB | Adds a high shelf boost/cut at 10kHz |
-| Output Volume | -12 to +6 dB | Overrides `outputTrimDb` |
+In `src/lib/dsp/plugins/ResonanceSuppressor.ts`:
+- Apply 5-bin median smoothing to spectral magnitude before peak detection
+- This prevents notching transient consonant spikes that look like resonances but aren't
 
-Default positions = AI decision values (100%, 100%, 0dB, original trim).
+### Fix 4: Internal Gain Reduction Clamp in Compressor
 
-On slider change: debounce 300ms, then call `renderWithOverrides(file, decision, overrides)` which builds the same DSP chain but with scaled values. Updates the current version's blob/url/buffer in place. Waveform updates automatically since it reads the buffer.
+In `src/lib/dsp/plugins/Compressor.ts`:
+- Hard internal clamp: max gain reduction = -12dB regardless of threshold/ratio combination
+- This is inside the plugin, not just in SafetyRails — defense in depth
 
-`renderWithOverrides` in dspEngine.ts: same as `renderWithDecision` but accepts `{ harshnessPct, sibilancePct, brightnessDb, outputDb }` and multiplies/overrides the relevant params.
+### Fix 5: GainRider Ramp Rate Limiter
 
-**3. Soft Duration Limit**
+In `src/lib/dsp/plugins/GainRider.ts`:
+- Max gain change rate: 6 dB/second
+- Slew-limit the gain automation curve to prevent robotic pumping artifacts
 
-In `useAudioEngine.ts`:
-- Remove the hard block at 300s
-- If duration > 360s (6 min), show toast warning: "Long audio detected — processing the first 6 minutes. For best results, trim your clip."
-- The 18MB size gate in geminiClient.ts still protects against truly oversized files
-- All error toasts get friendlier language throughout
+### Fix 6: Add DynamicEQ Mud Band to Safe Baseline
 
-**4. Index.tsx Changes**
+In `src/lib/dsp/VariantAudition.ts`, the Safe Baseline chain becomes:
+- HPF 80Hz → DynamicEQ (single mud band: 250Hz, Q=1.2, max -3dB) → ResonanceSuppressor (2 notches, -3dB) → DeEsser (-3dB) → Compressor (2:1) → Limiter -1dBFS → OutputStage
 
-- Store decoded `originalBuffer` in useAudioEngine (from the analysis step)
-- Pass `originalBuffer` and `currentVersion?.buffer` to `<WaveformComparison />`
-- Show `<LiveSliders />` below waveform when a version exists
-- Remove individual `AudioPlayerPanel` per version, keep just Original + Current audio elements above the waveform
+### Fix 7: Centralized Frequency Band Definitions
+
+Create `src/lib/dsp/frequencyBands.ts`:
+```
+rumble: [20, 80]
+plosive: [80, 200]
+mud: [200, 500]
+lowMid: [500, 2000]
+presence: [2000, 4000]
+harshness: [3000, 5000]
+sibilance: [5000, 9000]
+air: [10000, 16000]
+```
+All modules (ScoringEngine, IssueMap, ResonanceSuppressor, StyleProfiles, DynamicEQ) import from this single source.
+
+### Fix 8: Normalize Scoring Metrics to 0-1
+
+In `src/lib/dsp/ScoringEngine.ts`:
+- Before applying weights, normalize every metric to 0-1 scale
+- dB metrics: map expected range (e.g., -60 to 0) → 0-1
+- Ratios: already 0-1, keep as-is
+- Percentages: divide by 100
+- This prevents dB-scale metrics from dominating ratio-scale metrics
+
+### Fix 9: Cap Variant Count
+
+In `src/lib/dsp/VariantAudition.ts`:
+- `MAX_VARIANTS = 4`
+- If Gemini returns more than 4, keep the first 4 (plus Safe Baseline = 5 total max)
+
+### Fix 10: Shared Analysis Cache
+
+Create `src/lib/dsp/AnalysisCache.ts`:
+- Stores computed FFT frames, band energies, spectral centroid per buffer
+- Keyed by buffer identity (reference equality)
+- `IssueMap` and `ScoringEngine` both check cache before computing
+- Reduces redundant FFT computation by ~40-60%
+
+### Fix 11: True Peak Safety on Export
+
+In `src/lib/dsp/WavExporter.ts`:
+- After final render, compute 4x oversampled true peak estimate
+- If true peak > 0 dBFS: apply -0.5dB gain correction to entire buffer before export
+- Then re-check sample peak stays under ceiling
+
+### Fix 12: Plugin Order Validation Before Render
+
+In `src/lib/dsp/OfflineRenderEngine.ts`:
+- Before rendering any chain, validate that plugin IDs match the fixed template order exactly
+- If order mismatch: reject the chain, log error, fall back to Safe Baseline
+- Defense against bugs, not just Gemini — any code path that constructs a chain must pass this gate
+
+### Files Summary
+
+**New files:**
+- `src/lib/dsp/frequencyBands.ts`
+- `src/lib/dsp/AnalysisCache.ts`
+
+**Amended files (changes baked into existing planned files):**
+- `src/lib/dsp/loudness.ts` — add RLB weighting stage
+- `src/lib/dsp/plugins/DenoiseLite.ts` — lock STFT constants
+- `src/lib/dsp/plugins/ResonanceSuppressor.ts` — median smoothing pre-pass
+- `src/lib/dsp/plugins/Compressor.ts` — internal -12dB GR clamp
+- `src/lib/dsp/plugins/GainRider.ts` — 6dB/s ramp limiter
+- `src/lib/dsp/VariantAudition.ts` — add DynamicEQ mud band to Safe Baseline, cap at 4 variants
+- `src/lib/dsp/ScoringEngine.ts` — normalize metrics to 0-1 before weighting, use AnalysisCache
+- `src/lib/dsp/IssueMap.ts` — use AnalysisCache
+- `src/lib/dsp/WavExporter.ts` — true peak check with -0.5dB correction
+- `src/lib/dsp/OfflineRenderEngine.ts` — plugin order validation gate
+
+All fixes slot into the existing 8-phase implementation order. No new phases needed.
 
