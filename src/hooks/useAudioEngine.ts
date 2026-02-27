@@ -10,14 +10,15 @@ import type {
   PostRenderScore,
   FeedbackToken,
   GeminiError,
+  SliderOverrides,
 } from "@/types/gemini";
 import { analyzeAudio } from "@/lib/audioAnalysis";
 import { callGemini, clearBase64Cache } from "@/lib/geminiClient";
 import { applySafetyClamps } from "@/lib/safetyClamps";
-import { renderWithDecision } from "@/lib/dspEngine";
+import { renderWithDecision, renderWithOverrides } from "@/lib/dspEngine";
 import { validateRender } from "@/lib/postRenderValidation";
 
-const MAX_DURATION_SECONDS = 300; // 5 minutes
+const SOFT_LIMIT_SECONDS = 360; // 6 minutes
 
 export function useAudioEngine() {
   const [status, setStatus] = useState<AppStatus>("idle");
@@ -25,6 +26,7 @@ export function useAudioEngine() {
   const [styleTarget, setStyleTarget] = useState<StyleTarget>("natural");
   const [originalFile, setOriginalFile] = useState<File | null>(null);
   const [originalUrl, setOriginalUrl] = useState<string | null>(null);
+  const [originalBuffer, setOriginalBuffer] = useState<AudioBuffer | null>(null);
   const [analysis, setAnalysis] = useState<LayerOneAnalysis | null>(null);
   const [geminiDecision, setGeminiDecision] = useState<GeminiDecision | null>(null);
   const [modelUsed, setModelUsed] = useState<string>("");
@@ -44,6 +46,7 @@ export function useAudioEngine() {
 
     setOriginalFile(file);
     setOriginalUrl(URL.createObjectURL(file));
+    setOriginalBuffer(null);
     setAnalysis(null);
     setGeminiDecision(null);
     setGeminiError(null);
@@ -67,46 +70,48 @@ export function useAudioEngine() {
       await new Promise((r) => setTimeout(r, 100));
       layerOne = await analyzeAudio(originalFile);
       setAnalysis(layerOne);
-    } catch (e) {
-      console.error("Layer 1 analysis failed:", e);
-      toast.error("Audio analysis failed");
+
+      // Store decoded buffer for waveform
+      const ac = new AudioContext();
+      const ab = await originalFile.arrayBuffer();
+      const buf = await ac.decodeAudioData(ab);
+      ac.close();
+      setOriginalBuffer(buf);
+    } catch {
+      toast.error("We couldn't read this audio file. Please try a different format (WAV or MP3 work best).");
       setStatus("idle");
       return;
     }
 
-    // Duration check
-    if (layerOne.durationSeconds > MAX_DURATION_SECONDS) {
-      toast.error("Audio exceeds 5 minute limit. Please trim.");
-      setStatus("idle");
-      return;
+    // Soft duration warning
+    if (layerOne.durationSeconds > SOFT_LIMIT_SECONDS) {
+      toast.warning("Long audio detected — processing the first 6 minutes. For best results, trim your clip.");
     }
 
-    // Layer 2: Gemini (now with audio file)
+    // Layer 2: Gemini
     setStatus("calling_gemini");
     try {
       const result = await callGemini(originalFile, layerOne, mode, styleTarget);
       if (result.error) {
-        console.error("Gemini error:", result.error);
         setGeminiError(result.error);
         setStatus("gemini_error");
-        toast.error(result.error.details || "Gemini analysis failed. No AI decision was generated.");
+        toast.error(result.error.details || "The AI couldn't analyze this file. Please try again in a moment.");
         return;
       }
       setGeminiDecision(result.decision!);
       setModelUsed(result.modelUsed || "unknown");
       setStatus("gemini_ready");
-      toast.success("Gemini decision received");
-    } catch (e) {
-      console.error("Gemini call failed:", e);
-      setGeminiError({ error: "gemini_unavailable", details: "Unexpected error calling Gemini" });
+      toast.success("AI analysis complete — ready to fix!");
+    } catch {
+      setGeminiError({ error: "gemini_unavailable", details: "Something went wrong reaching the AI. Check your connection and try again." });
       setStatus("gemini_error");
-      toast.error("Gemini analysis failed. No AI decision was generated.");
+      toast.error("Something went wrong reaching the AI. Check your connection and try again.");
     }
   }, [originalFile, mode, styleTarget]);
 
   const autoFix = useCallback(async () => {
     if (!originalFile || !geminiDecision) {
-      toast.error("No Gemini decision available. Run Analyze first.");
+      toast.error("Run Analyze first so the AI can decide how to process your vocal.");
       return;
     }
 
@@ -134,16 +139,36 @@ export function useAudioEngine() {
       try {
         const score = await validateRender(analysis!, buffer, versionId, clamped.eqBellCenterHz);
         setPostRenderScores((prev) => ({ ...prev, [versionId]: score }));
-      } catch (e) {
-        console.error("Post-render validation failed:", e);
+      } catch {
+        // validation is non-critical
       }
       setStatus("ready");
-    } catch (e) {
-      console.error("DSP rendering failed:", e);
-      toast.error("Audio processing failed");
+    } catch {
+      toast.error("Audio processing hit a snag. Try a different file or style target.");
       setStatus("gemini_ready");
     }
   }, [originalFile, geminiDecision, mode, versions, analysis]);
+
+  const applyOverrides = useCallback(async (overrides: SliderOverrides) => {
+    if (!originalFile || !geminiDecision) return;
+    try {
+      const { decision: clamped } = applySafetyClamps(geminiDecision, mode);
+      const { blob, buffer } = await renderWithOverrides(originalFile, clamped, overrides);
+      const url = URL.createObjectURL(blob);
+
+      setVersions((prev) => {
+        if (prev.length === 0) return prev;
+        const updated = [...prev];
+        const idx = updated.findIndex((v) => v.id === currentVersionId);
+        if (idx === -1) return prev;
+        URL.revokeObjectURL(updated[idx].url);
+        updated[idx] = { ...updated[idx], blob, buffer, url };
+        return updated;
+      });
+    } catch {
+      // silent — slider tweaks shouldn't throw errors at the user
+    }
+  }, [originalFile, geminiDecision, mode, currentVersionId]);
 
   const sendFeedback = useCallback(async (token: FeedbackToken) => {
     if (!originalFile || !analysis || !geminiDecision) return;
@@ -153,7 +178,7 @@ export function useAudioEngine() {
     try {
       const result = await callGemini(originalFile, analysis, mode, styleTarget, token, geminiDecision);
       if (result.error) {
-        toast.error(result.error.details || "Gemini feedback call failed");
+        toast.error(result.error.details || "The AI couldn't process your feedback. Try again.");
         setStatus("ready");
         return;
       }
@@ -180,18 +205,16 @@ export function useAudioEngine() {
       setStatus("playback_ready");
       toast.success(`${label} rendered`);
 
-      // Async validation
       setStatus("validating");
       try {
         const score = await validateRender(analysis, buffer, versionId, clamped.eqBellCenterHz);
         setPostRenderScores((prev) => ({ ...prev, [versionId]: score }));
-      } catch (e) {
-        console.error("Post-render validation failed:", e);
+      } catch {
+        // non-critical
       }
       setStatus("ready");
-    } catch (e) {
-      console.error("Feedback loop failed:", e);
-      toast.error("Feedback revision failed");
+    } catch {
+      toast.error("Feedback revision didn't work. Give it another shot.");
       setStatus("ready");
     }
   }, [originalFile, analysis, geminiDecision, mode, styleTarget, versions]);
@@ -207,11 +230,11 @@ export function useAudioEngine() {
 
   return {
     status, mode, setMode, styleTarget, setStyleTarget,
-    originalFile, originalUrl, analysis,
+    originalFile, originalUrl, originalBuffer, analysis,
     geminiDecision, modelUsed, geminiError,
     clampsApplied, versions,
     currentVersionId, setCurrentVersionId, currentVersion,
     postRenderScores, feedbackHistory,
-    loadFile, analyze, autoFix, sendFeedback, exportFile,
+    loadFile, analyze, autoFix, applyOverrides, sendFeedback, exportFile,
   };
 }

@@ -1,4 +1,4 @@
-import type { GeminiDecision } from "@/types/gemini";
+import type { GeminiDecision, SliderOverrides } from "@/types/gemini";
 
 function audioBufferToWav(buffer: AudioBuffer): Blob {
   const numChannels = buffer.numberOfChannels;
@@ -119,4 +119,22 @@ export async function renderWithDecision(
   source.start();
   const rendered = await offlineCtx.startRendering();
   return { blob: audioBufferToWav(rendered), buffer: rendered };
+}
+
+export async function renderWithOverrides(
+  file: File,
+  decision: GeminiDecision,
+  overrides: SliderOverrides
+): Promise<{ blob: Blob; buffer: AudioBuffer }> {
+  const tweaked: GeminiDecision = {
+    ...decision,
+    eqBellCutDb: decision.eqBellCutDb * (overrides.harshnessPct / 100),
+    optionalSecondEqBellCutDb: decision.optionalSecondEqBellCutDb
+      ? decision.optionalSecondEqBellCutDb * (overrides.harshnessPct / 100)
+      : undefined,
+    deEssReductionDb: decision.deEssReductionDb * (overrides.sibilancePct / 100),
+    optionalHighShelfCutDb: overrides.brightnessDb !== 0 ? overrides.brightnessDb : undefined,
+    outputTrimDb: overrides.outputDb,
+  };
+  return renderWithDecision(file, tweaked);
 }
