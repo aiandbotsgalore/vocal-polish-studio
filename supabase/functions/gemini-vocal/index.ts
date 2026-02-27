@@ -55,8 +55,28 @@ const TOOL_SCHEMA = {
   },
 };
 
-async function callModel(model: string, apiKey: string, body: any): Promise<Response> {
-  return await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+function getApiConfig(): { baseUrl: string; apiKey: string; modelPrefix: string } {
+  const googleKey = Deno.env.get("GOOGLE_API_KEY");
+  if (googleKey) {
+    return {
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      apiKey: googleKey,
+      modelPrefix: "",
+    };
+  }
+  const lovableKey = Deno.env.get("LOVABLE_API_KEY");
+  if (lovableKey) {
+    return {
+      baseUrl: "https://ai.gateway.lovable.dev/v1/chat/completions",
+      apiKey: lovableKey,
+      modelPrefix: "google/",
+    };
+  }
+  throw new Error("No API key configured (GOOGLE_API_KEY or LOVABLE_API_KEY)");
+}
+
+async function callModel(model: string, apiKey: string, baseUrl: string, body: any): Promise<Response> {
+  return await fetch(baseUrl, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -73,13 +93,17 @@ serve(async (req) => {
 
   try {
     const { analysis, mode, styleTarget, feedback, priorDecision } = await req.json();
-    const apiKey = Deno.env.get("LOVABLE_API_KEY");
-    if (!apiKey) {
+    let apiConfig;
+    try {
+      apiConfig = getApiConfig();
+    } catch (e) {
       return new Response(
-        JSON.stringify({ error: "gemini_unavailable", details: "LOVABLE_API_KEY not configured" }),
+        JSON.stringify({ error: "gemini_unavailable", details: e.message }),
         { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+    const { baseUrl, apiKey, modelPrefix } = apiConfig;
+    console.log("Using API endpoint:", baseUrl);
 
     // Build user message
     let userContent = `## Analysis Data\n\`\`\`json\n${JSON.stringify(analysis, null, 2)}\n\`\`\`\n\n`;
@@ -104,11 +128,11 @@ serve(async (req) => {
       tool_choice: { type: "function", function: { name: "vocal_decision" } },
     };
 
-    const PRIMARY_MODEL = "google/gemini-3-pro-preview";
-    const FALLBACK_MODEL = "google/gemini-2.5-pro";
+    const PRIMARY_MODEL = `${modelPrefix}gemini-3-pro-preview`;
+    const FALLBACK_MODEL = `${modelPrefix}gemini-2.5-pro`;
 
     // Try primary model
-    let response = await callModel(PRIMARY_MODEL, apiKey, body);
+    let response = await callModel(PRIMARY_MODEL, apiKey, baseUrl, body);
     let modelUsed = PRIMARY_MODEL;
 
     if (!response.ok) {
@@ -131,7 +155,7 @@ serve(async (req) => {
 
       // Try fallback
       console.log(`Retrying with fallback model: ${FALLBACK_MODEL}`);
-      response = await callModel(FALLBACK_MODEL, apiKey, body);
+      response = await callModel(FALLBACK_MODEL, apiKey, baseUrl, body);
       modelUsed = FALLBACK_MODEL;
 
       if (!response.ok) {
