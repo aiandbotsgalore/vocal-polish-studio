@@ -92,6 +92,29 @@ const Index = () => {
           </Button>
         </div>
 
+        {/* Progress indicator during analysis/Gemini call */}
+        {(status === "analyzing" || status === "calling_gemini" || status === "fixing" || status === "validating") && (
+          <div className="rounded-lg panel-gradient studio-border p-5 space-y-3">
+            <div className="flex items-center gap-3">
+              <div className="relative flex h-8 w-8 items-center justify-center shrink-0">
+                <div className="absolute inset-0 rounded-full border-2 border-primary/30 border-t-primary animate-spin" />
+                <Sparkles className="h-3.5 w-3.5 text-primary" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-foreground">
+                  {status === "analyzing" ? "Analyzing audio…" : status === "calling_gemini" ? "Consulting Gemini AI…" : status === "fixing" ? "Rendering audio…" : "Validating output…"}
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  {status === "analyzing" ? "Measuring harshness, sibilance & frequency profile" : status === "calling_gemini" ? "AI is deciding optimal EQ, de-essing & processing strategy" : status === "fixing" ? "Applying DSP chain to your vocal" : "Comparing before & after metrics"}
+                </p>
+              </div>
+            </div>
+            <div className="h-1 w-full overflow-hidden rounded-full bg-secondary">
+              <div className="h-full rounded-full bg-primary/70 w-1/3 animate-[pulse_1.5s_ease-in-out_infinite]" />
+            </div>
+          </div>
+        )}
+
         {/* Gemini Error */}
         {geminiError && (
           <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 flex items-start gap-3">
