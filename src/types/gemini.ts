@@ -128,6 +128,13 @@ export interface PostRenderScore {
   targetedBandDeltaDb: number;
 }
 
+export interface SliderOverrides {
+  harshnessPct: number;   // 0–100
+  sibilancePct: number;   // 0–100
+  brightnessDb: number;   // -6 to +6
+  outputDb: number;       // -12 to +6
+}
+
 export interface GeminiError {
   error: string;
   details?: string;

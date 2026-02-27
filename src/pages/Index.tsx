@@ -2,6 +2,8 @@ import { useAudioEngine } from "@/hooks/useAudioEngine";
 import { FileUploadCard } from "@/components/FileUploadCard";
 import { AnalysisReport } from "@/components/AnalysisReport";
 import { AudioPlayerPanel } from "@/components/AudioPlayerPanel";
+import { WaveformComparison } from "@/components/WaveformComparison";
+import { LiveSliders } from "@/components/LiveSliders";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ModeSelector } from "@/components/ModeSelector";
 import { StyleTargetSelector } from "@/components/StyleTargetSelector";
@@ -19,6 +21,7 @@ const Index = () => {
     styleTarget, setStyleTarget,
     originalFile,
     originalUrl,
+    originalBuffer,
     analysis,
     geminiDecision,
     modelUsed,
@@ -31,6 +34,7 @@ const Index = () => {
     loadFile,
     analyze,
     autoFix,
+    applyOverrides,
     sendFeedback,
     exportFile,
   } = useAudioEngine();
@@ -92,7 +96,7 @@ const Index = () => {
           </Button>
         </div>
 
-        {/* Progress indicator during analysis/Gemini call */}
+        {/* Progress indicator */}
         {(status === "analyzing" || status === "calling_gemini" || status === "fixing" || status === "validating") && (
           <div className="rounded-lg panel-gradient studio-border p-5 space-y-3">
             <div className="flex items-center gap-3">
@@ -120,13 +124,13 @@ const Index = () => {
           <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 flex items-start gap-3">
             <AlertTriangle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-medium text-destructive">Gemini analysis failed</p>
-              <p className="text-xs text-destructive/80 mt-1">{geminiError.details || "No AI decision was generated. Please check your API key, network connection, or model availability and try again."}</p>
+              <p className="text-sm font-medium text-destructive">AI analysis didn't complete</p>
+              <p className="text-xs text-destructive/80 mt-1">{geminiError.details || "Please check your connection and try again."}</p>
             </div>
           </div>
         )}
 
-        {/* Two column layout for report + autonomy panel */}
+        {/* Two column layout */}
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="lg:col-span-2 space-y-6">
             {/* Analysis Report */}
@@ -141,19 +145,31 @@ const Index = () => {
               />
             )}
 
-            {/* Players */}
+            {/* Players: Original + Current only */}
             {(originalUrl || currentVersion) && (
               <div className="space-y-3">
                 <AudioPlayerPanel label="Before (Original)" url={originalUrl} />
-                {versions.map((v) => (
-                  <AudioPlayerPanel
-                    key={v.id}
-                    label={v.label}
-                    url={v.url}
-                    accent={v.id === currentVersionId}
-                  />
-                ))}
+                {currentVersion && (
+                  <AudioPlayerPanel label={currentVersion.label} url={currentVersion.url} accent />
+                )}
               </div>
+            )}
+
+            {/* Waveform A/B */}
+            {(originalBuffer || currentVersion) && (
+              <WaveformComparison
+                originalBuffer={originalBuffer}
+                processedBuffer={currentVersion?.buffer || null}
+              />
+            )}
+
+            {/* Live Sliders */}
+            {currentVersion && geminiDecision && (
+              <LiveSliders
+                decision={geminiDecision}
+                onOverridesChange={applyOverrides}
+                disabled={busy}
+              />
             )}
 
             {/* Feedback */}
