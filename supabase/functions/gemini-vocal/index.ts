@@ -6,12 +6,133 @@ const corsHeaders = {
 };
 
 const ALLOWED_MIME_TYPES = ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"];
-const MAX_BASE64_LENGTH = 14_000_000; // ~10.5 MB raw
 const MIN_BASE64_LENGTH = 2000;
 
-const PRIMARY_MODEL = "gemini-2.5-pro";
-const FALLBACK_MODEL = "gemini-2.5-flash";
+const PRIMARY_MODEL = "gemini-3.1-pro-preview";
+const FALLBACK_MODEL = "gemini-3-pro-preview";
 const TIMEOUT_MS = 120_000;
+const FILE_API_BASE = "https://generativelanguage.googleapis.com";
+
+// ── File API helpers ──
+
+async function uploadToFileApi(
+  apiKey: string,
+  audioBase64: string,
+  mimeType: string,
+): Promise<{ fileUri: string; fileName: string }> {
+  // Base64 → binary
+  const binary = atob(audioBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+
+  // Step 1: Start resumable upload
+  const startRes = await fetch(
+    `${FILE_API_BASE}/upload/v1beta/files?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: {
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": String(bytes.byteLength),
+        "X-Goog-Upload-Header-Content-Type": mimeType,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ file: { displayName: "vocal-upload" } }),
+    },
+  );
+
+  if (!startRes.ok) {
+    const errText = await startRes.text();
+    throw new Error(`File API start failed (${startRes.status}): ${errText}`);
+  }
+  // Consume body to prevent resource leak
+  await startRes.text();
+
+  // Extract upload URL from headers
+  const uploadUrl =
+    startRes.headers.get("x-goog-upload-url") ||
+    startRes.headers.get("location");
+  if (!uploadUrl) {
+    throw new Error("File API did not return an upload URL");
+  }
+
+  // Step 2: Upload bytes
+  const uploadRes = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Length": String(bytes.byteLength),
+      "X-Goog-Upload-Offset": "0",
+      "X-Goog-Upload-Command": "upload, finalize",
+    },
+    body: bytes,
+  });
+
+  if (!uploadRes.ok) {
+    const errText = await uploadRes.text();
+    throw new Error(`File API upload failed (${uploadRes.status}): ${errText}`);
+  }
+
+  const result = await uploadRes.json();
+  const file = result.file;
+  if (!file?.uri || !file?.name) {
+    throw new Error(`File API returned unexpected shape: ${JSON.stringify(result).slice(0, 500)}`);
+  }
+
+  console.log(`File uploaded: ${file.name}, uri: ${file.uri}`);
+  return { fileUri: file.uri, fileName: file.name };
+}
+
+async function waitForFileActive(
+  apiKey: string,
+  fileName: string,
+): Promise<void> {
+  const maxPolls = 15;
+  const pollIntervalMs = 2000;
+
+  for (let i = 0; i < maxPolls; i++) {
+    const res = await fetch(
+      `${FILE_API_BASE}/v1beta/${fileName}?key=${apiKey}`,
+    );
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`File API status check failed (${res.status}): ${errText}`);
+    }
+
+    const data = await res.json();
+    console.log(`File state poll ${i + 1}/${maxPolls}: ${data.state}`);
+
+    if (data.state === "ACTIVE") return;
+    if (data.state === "FAILED") {
+      throw new Error(`File processing failed: ${JSON.stringify(data.error || data)}`);
+    }
+
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+
+  throw new Error(`File did not become ACTIVE after ${maxPolls * pollIntervalMs / 1000}s`);
+}
+
+async function deleteFile(apiKey: string, fileName: string): Promise<void> {
+  try {
+    const res = await fetch(
+      `${FILE_API_BASE}/v1beta/${fileName}?key=${apiKey}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error(`File delete failed (${res.status}): ${errText}`);
+    } else {
+      await res.text(); // consume body
+      console.log(`File deleted: ${fileName}`);
+    }
+  } catch (e) {
+    console.error(`File delete error:`, e);
+  }
+}
+
+// ── Gemini call ──
 
 const SYSTEM_PROMPT = `You are a professional Audio Engineer with deep expertise in vocal processing. You are receiving BOTH spectral analysis metrics AND the actual audio file. Listen to the audio.
 
@@ -110,6 +231,19 @@ async function callGeminiNative(
   }
 }
 
+// ── Style profile data ──
+
+const STYLE_PROFILE_DATA: Record<string, { bandRatios: Record<string, number>; centroidRange: [number, number]; targetLufs: number; noiseTolerance: string }> = {
+  natural: { bandRatios: { rumble: 0.03, plosive: 0.06, mud: 0.15, lowMid: 0.32, presence: 0.22, harshness: 0.10, sibilance: 0.07, air: 0.05 }, centroidRange: [1400, 3600], targetLufs: -16, noiseTolerance: "High" },
+  podcast_clean: { bandRatios: { rumble: 0.01, plosive: 0.04, mud: 0.12, lowMid: 0.35, presence: 0.25, harshness: 0.10, sibilance: 0.08, air: 0.05 }, centroidRange: [1800, 3200], targetLufs: -16, noiseTolerance: "Moderate" },
+  warm_smooth: { bandRatios: { rumble: 0.02, plosive: 0.05, mud: 0.16, lowMid: 0.36, presence: 0.20, harshness: 0.08, sibilance: 0.07, air: 0.06 }, centroidRange: [1400, 2600], targetLufs: -16, noiseTolerance: "Moderate" },
+  modern_bright: { bandRatios: { rumble: 0.01, plosive: 0.04, mud: 0.08, lowMid: 0.28, presence: 0.30, harshness: 0.13, sibilance: 0.09, air: 0.07 }, centroidRange: [2500, 4200], targetLufs: -14, noiseTolerance: "Moderate" },
+  presence_forward: { bandRatios: { rumble: 0.01, plosive: 0.04, mud: 0.09, lowMid: 0.28, presence: 0.32, harshness: 0.12, sibilance: 0.08, air: 0.06 }, centroidRange: [2400, 4000], targetLufs: -14, noiseTolerance: "Low" },
+  aggressive: { bandRatios: { rumble: 0.02, plosive: 0.06, mud: 0.08, lowMid: 0.25, presence: 0.30, harshness: 0.14, sibilance: 0.09, air: 0.06 }, centroidRange: [2800, 4500], targetLufs: -12, noiseTolerance: "High" },
+};
+
+// ── Main handler ──
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -127,16 +261,10 @@ serve(async (req) => {
       );
     }
 
-    // ── Server-side validations ──
+    // ── Validations ──
     if (!audioBase64 || audioBase64.length < MIN_BASE64_LENGTH) {
       return new Response(
         JSON.stringify({ error: "invalid_payload", details: "Invalid audio payload received." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
-    if (audioBase64.length > MAX_BASE64_LENGTH) {
-      return new Response(
-        JSON.stringify({ error: "file_too_large", details: "Audio payload exceeds inline Gemini limits. Trim the clip or convert to shorter audio." }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
@@ -147,20 +275,18 @@ serve(async (req) => {
       );
     }
 
-    // ── Build prompt text ──
+    // ── Upload to File API ──
+    console.log("Uploading audio to File API...");
+    const { fileUri, fileName } = await uploadToFileApi(apiKey, audioBase64, audioMimeType);
+
+    // ── Wait for file to become ACTIVE ──
+    console.log("Waiting for file to become ACTIVE...");
+    await waitForFileActive(apiKey, fileName);
+
+    // ── Build prompt ──
     let promptText = `${SYSTEM_PROMPT}\n\n## Analysis Data\n\`\`\`json\n${JSON.stringify(analysis, null, 2)}\n\`\`\`\n\n`;
     promptText += `## Settings\n- Mode: ${mode === "safe" ? "Safe (conservative, minimal intervention)" : "Unleashed (broad authority, aggressive allowed)"}\n`;
     promptText += `- Style Target: ${styleTarget}\n`;
-
-    // ── Style profile reference data ──
-    const STYLE_PROFILE_DATA: Record<string, { bandRatios: Record<string, number>; centroidRange: [number, number]; targetLufs: number; noiseTolerance: string }> = {
-      natural: { bandRatios: { rumble: 0.03, plosive: 0.06, mud: 0.15, lowMid: 0.32, presence: 0.22, harshness: 0.10, sibilance: 0.07, air: 0.05 }, centroidRange: [1400, 3600], targetLufs: -16, noiseTolerance: "High" },
-      podcast_clean: { bandRatios: { rumble: 0.01, plosive: 0.04, mud: 0.12, lowMid: 0.35, presence: 0.25, harshness: 0.10, sibilance: 0.08, air: 0.05 }, centroidRange: [1800, 3200], targetLufs: -16, noiseTolerance: "Moderate" },
-      warm_smooth: { bandRatios: { rumble: 0.02, plosive: 0.05, mud: 0.16, lowMid: 0.36, presence: 0.20, harshness: 0.08, sibilance: 0.07, air: 0.06 }, centroidRange: [1400, 2600], targetLufs: -16, noiseTolerance: "Moderate" },
-      modern_bright: { bandRatios: { rumble: 0.01, plosive: 0.04, mud: 0.08, lowMid: 0.28, presence: 0.30, harshness: 0.13, sibilance: 0.09, air: 0.07 }, centroidRange: [2500, 4200], targetLufs: -14, noiseTolerance: "Moderate" },
-      presence_forward: { bandRatios: { rumble: 0.01, plosive: 0.04, mud: 0.09, lowMid: 0.28, presence: 0.32, harshness: 0.12, sibilance: 0.08, air: 0.06 }, centroidRange: [2400, 4000], targetLufs: -14, noiseTolerance: "Low" },
-      aggressive: { bandRatios: { rumble: 0.02, plosive: 0.06, mud: 0.08, lowMid: 0.25, presence: 0.30, harshness: 0.14, sibilance: 0.09, air: 0.06 }, centroidRange: [2800, 4500], targetLufs: -12, noiseTolerance: "High" },
-    };
 
     const profile = STYLE_PROFILE_DATA[styleTarget] || STYLE_PROFILE_DATA.natural;
     const bandLines = Object.entries(profile.bandRatios)
@@ -175,120 +301,124 @@ serve(async (req) => {
       promptText += `\n## Prior Decision (for reference)\n\`\`\`json\n${JSON.stringify(priorDecision, null, 2)}\n\`\`\`\n`;
     }
 
-    // ── Gemini-native request ──
+    // ── Build contents with file_data ──
     const contents = [
       {
         role: "user",
         parts: [
           { text: promptText },
-          { inlineData: { mimeType: audioMimeType, data: audioBase64 } },
+          { file_data: { mime_type: audioMimeType, file_uri: fileUri } },
         ],
       },
     ];
 
-    // ── Primary model ──
-    console.log(`Attempting primary model: ${PRIMARY_MODEL}`);
-    let response: Response;
+    // ── Call Gemini (with cleanup in finally) ──
     let modelUsed = PRIMARY_MODEL;
 
     try {
-      response = await callGeminiNative(PRIMARY_MODEL, apiKey, contents);
-    } catch (e) {
-      if (e.name === "AbortError") {
-        console.error(`Primary model (${PRIMARY_MODEL}) timed out after ${TIMEOUT_MS}ms`);
-      } else {
-        console.error(`Primary model (${PRIMARY_MODEL}) fetch error:`, e);
-      }
-      // Fall through to fallback
-      response = null as any;
-    }
+      console.log(`Attempting primary model: ${PRIMARY_MODEL}`);
+      let response: Response;
 
-    if (!response || !response.ok) {
-      if (response) {
-        const errText = await response.text();
-        console.error(`Primary model (${PRIMARY_MODEL}) failed: ${response.status}`, errText);
-      }
-
-      // ── Fallback model ──
-      console.log(`Attempting fallback model: ${FALLBACK_MODEL}`);
-      modelUsed = FALLBACK_MODEL;
       try {
-        response = await callGeminiNative(FALLBACK_MODEL, apiKey, contents);
+        response = await callGeminiNative(PRIMARY_MODEL, apiKey, contents);
       } catch (e) {
-        const reason = e.name === "AbortError" ? `timed out after ${TIMEOUT_MS}ms` : (e.message || "fetch error");
-        console.error(`Fallback model (${FALLBACK_MODEL}) failed:`, reason);
+        if (e.name === "AbortError") {
+          console.error(`Primary model (${PRIMARY_MODEL}) timed out after ${TIMEOUT_MS}ms`);
+        } else {
+          console.error(`Primary model (${PRIMARY_MODEL}) fetch error:`, e);
+        }
+        response = null as any;
+      }
+
+      if (!response || !response.ok) {
+        if (response) {
+          const errText = await response.text();
+          console.error(`Primary model (${PRIMARY_MODEL}) failed: ${response.status}`, errText);
+        }
+
+        console.log(`Attempting fallback model: ${FALLBACK_MODEL}`);
+        modelUsed = FALLBACK_MODEL;
+        try {
+          response = await callGeminiNative(FALLBACK_MODEL, apiKey, contents);
+        } catch (e) {
+          const reason = e.name === "AbortError" ? `timed out after ${TIMEOUT_MS}ms` : (e.message || "fetch error");
+          console.error(`Fallback model (${FALLBACK_MODEL}) failed:`, reason);
+          return new Response(
+            JSON.stringify({
+              error: "gemini_unavailable",
+              details: `Both models failed. Primary: ${PRIMARY_MODEL}, Fallback: ${FALLBACK_MODEL}. Last error: ${reason}`,
+              model: FALLBACK_MODEL,
+            }),
+            { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+          );
+        }
+
+        if (!response.ok) {
+          const errText = await response.text();
+          console.error(`Fallback model (${FALLBACK_MODEL}) failed: ${response.status}`, errText);
+          return new Response(
+            JSON.stringify({
+              error: "gemini_unavailable",
+              details: `Both models failed. Fallback (${FALLBACK_MODEL}) returned ${response.status}.`,
+              model: FALLBACK_MODEL,
+            }),
+            { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+          );
+        }
+      }
+
+      console.log(`Model used: ${modelUsed}, status: ${response.status}`);
+      const data = await response.json();
+      console.log("Gemini raw response:", JSON.stringify(data).slice(0, 2000));
+
+      // ── Parse response ──
+      const parts = data.candidates?.[0]?.content?.parts || [];
+      const fnPart = parts.find((p: any) => p.functionCall);
+
+      if (!fnPart) {
+        console.error("No functionCall found in response parts:", JSON.stringify(parts).slice(0, 1000));
         return new Response(
-          JSON.stringify({
-            error: "gemini_unavailable",
-            details: `Both models failed. Primary: ${PRIMARY_MODEL}, Fallback: ${FALLBACK_MODEL}. Last error: ${reason}`,
-            model: FALLBACK_MODEL,
-          }),
+          JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned an unexpected response format. No function call found.", model: modelUsed }),
           { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
 
-      if (!response.ok) {
-        const errText = await response.text();
-        console.error(`Fallback model (${FALLBACK_MODEL}) failed: ${response.status}`, errText);
+      const decision = fnPart.functionCall.args;
+      if (!decision || typeof decision !== "object") {
+        console.error("functionCall.args is empty or invalid:", JSON.stringify(fnPart).slice(0, 500));
         return new Response(
-          JSON.stringify({
-            error: "gemini_unavailable",
-            details: `Both models failed. Fallback (${FALLBACK_MODEL}) returned ${response.status}.`,
-            model: FALLBACK_MODEL,
-          }),
+          JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned empty function call arguments.", model: modelUsed }),
           { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
-    }
 
-    console.log(`Model used: ${modelUsed}, status: ${response.status}`);
-    const data = await response.json();
-    console.log("Gemini raw response:", JSON.stringify(data).slice(0, 2000));
+      // ── Validate required fields ──
+      const missingFields = REQUIRED_FIELDS.filter((f) => decision[f] === undefined || decision[f] === null);
+      if (missingFields.length > 0) {
+        console.error("Missing required fields:", missingFields);
+        return new Response(
+          JSON.stringify({ error: "gemini_incomplete", details: `Gemini returned incomplete decision. Missing: ${missingFields.join(", ")}`, model: modelUsed }),
+          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
 
-    // ── Parse response — scan all parts for functionCall ──
-    const parts = data.candidates?.[0]?.content?.parts || [];
-    const fnPart = parts.find((p: any) => p.functionCall);
+      // ── audioReceived enforcement ──
+      if (decision.audioReceived === false) {
+        console.error("Gemini reports audioReceived=false");
+        return new Response(
+          JSON.stringify({ error: "audio_not_received", details: "Gemini did not receive audio input. Analysis invalid.", model: modelUsed }),
+          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
 
-    if (!fnPart) {
-      console.error("No functionCall found in response parts:", JSON.stringify(parts).slice(0, 1000));
       return new Response(
-        JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned an unexpected response format. No function call found.", model: modelUsed }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        JSON.stringify({ decision, modelUsed }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
+    } finally {
+      // ── Cleanup: delete uploaded file ──
+      deleteFile(apiKey, fileName);
     }
-
-    const decision = fnPart.functionCall.args;
-    if (!decision || typeof decision !== "object") {
-      console.error("functionCall.args is empty or invalid:", JSON.stringify(fnPart).slice(0, 500));
-      return new Response(
-        JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned empty function call arguments.", model: modelUsed }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
-
-    // ── Validate required fields ──
-    const missingFields = REQUIRED_FIELDS.filter((f) => decision[f] === undefined || decision[f] === null);
-    if (missingFields.length > 0) {
-      console.error("Missing required fields:", missingFields);
-      return new Response(
-        JSON.stringify({ error: "gemini_incomplete", details: `Gemini returned incomplete decision. Missing: ${missingFields.join(", ")}`, model: modelUsed }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
-
-    // ── audioReceived enforcement ──
-    if (decision.audioReceived === false) {
-      console.error("Gemini reports audioReceived=false");
-      return new Response(
-        JSON.stringify({ error: "audio_not_received", details: "Gemini did not receive audio input. Analysis invalid.", model: modelUsed }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
-
-    return new Response(
-      JSON.stringify({ decision, modelUsed }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
   } catch (e) {
     console.error("gemini-vocal error:", e);
     return new Response(

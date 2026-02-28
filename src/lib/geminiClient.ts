@@ -20,7 +20,7 @@ export interface GeminiCallResult {
 
 // ── Constants ──
 const PROMPT_BUDGET = 50_000; // ~50 KB
-const MAX_REQUEST_SIZE = 18_000_000; // 18 MB
+const MAX_REQUEST_SIZE = 50_000_000; // 50 MB — File API handles large uploads server-side
 const ALLOWED_MIME_TYPES = ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"];
 
 // ── Base64 cache ──
