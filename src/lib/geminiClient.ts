@@ -7,11 +7,15 @@ import type {
   StyleTarget,
   FeedbackToken,
 } from "@/types/gemini";
+import { getStyleProfile } from "@/lib/dsp/StyleProfiles";
+import type { StyleProfile } from "@/lib/dsp/types";
 
 export interface GeminiCallResult {
   decision?: GeminiDecision;
   error?: GeminiError;
   modelUsed?: string;
+  /** Resolved style profile for use in scoring pipeline */
+  styleProfile?: StyleProfile;
 }
 
 // ── Constants ──
@@ -130,6 +134,7 @@ export async function callGemini(
     return {
       decision: data.decision as GeminiDecision,
       modelUsed: data.modelUsed as string,
+      styleProfile: getStyleProfile(styleTarget),
     };
   } catch (e) {
     return {
