@@ -9,8 +9,8 @@ const ALLOWED_MIME_TYPES = ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3
 const MAX_BASE64_LENGTH = 14_000_000; // ~10.5 MB raw
 const MIN_BASE64_LENGTH = 2000;
 
-const PRIMARY_MODEL = "gemini-3.1-pro-preview";
-const FALLBACK_MODEL = "gemini-3-pro-preview";
+const PRIMARY_MODEL = "gemini-2.5-pro";
+const FALLBACK_MODEL = "gemini-2.5-flash";
 const TIMEOUT_MS = 120_000;
 
 const SYSTEM_PROMPT = `You are a professional Audio Engineer with deep expertise in vocal processing. You are receiving BOTH spectral analysis metrics AND the actual audio file. Listen to the audio.
