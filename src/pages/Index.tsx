@@ -36,6 +36,7 @@ const Index = () => {
     autoFix,
     applyOverrides,
     sendFeedback,
+    feedbackHistory,
     exportFile,
   } = useAudioEngine();
 
@@ -208,7 +209,7 @@ const Index = () => {
             {versions.length > 0 && (
               <div className="space-y-3">
                 <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Feedback</p>
-                <FeedbackButtons onFeedback={sendFeedback} disabled={busy} />
+                <FeedbackButtons onFeedback={sendFeedback} disabled={busy} history={feedbackHistory} />
               </div>
             )}
           </div>
