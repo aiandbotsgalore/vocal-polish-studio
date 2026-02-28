@@ -1,31 +1,16 @@
+Based on the current codebase, here are the highest-impact improvements remaining:
 
-1) Stabilize immediate freeze points:
-- Add hard processing guardrails (interactive preview length cap; full-length render only on explicit final export).
-- Change slider rendering to commit-on-release + longer debounce; cancel stale in-flight renders when new input arrives.
-- Add explicit “Cancel processing” support for Analyze/Auto Fix/Feedback flows.
+**Performance**
 
-2) Remove main-thread CPU hotspots:
-- Replace naive per-bin/per-sample DFT code in `DenoiseLite`, `ResonanceSuppressor`, `computeNoiseProfile`, `AnalysisCache`, and `audioAnalysis` with a shared FFT utility.
-- Precompute/reuse Hann windows and trig tables by FFT size.
-- Early-exit heavy spectral passes when activation criteria fail (clean/noise-free input).
+1. **Web Worker for DSP rendering** — Move `renderOffline` off the main thread entirely. Even with time-budgeted yielding, heavy 14-plugin chains on long files still compete with UI paint. A dedicated worker eliminates this class of jank completely.
+2. **Streaming playback** — Right now the user waits for the full render to finish before hearing anything. Processing and piping chunks to an `AudioWorklet` would let them hear results within seconds, not minutes.
+3. **WASM-accelerated FFT** — The pure-JS radix-2 FFT is functional but slow for large block sizes. A small WASM module (e.g. KissFFT compiled via Emscripten) would cut spectral processing time by 5-10x.
 
-3) Eliminate duplicate full-buffer work:
-- In `autoFix`/`sendFeedback`, stop WAV-exporting every variant immediately; keep `AudioBuffer` in memory and export only selected version.
-- Run `validateRender` only for the currently selected/recommended variant.
-- Reuse cached spectral analysis for scoring + post-render checks instead of re-analyzing each version.
-- Decode source file once and reuse it in `renderWithOverrides` (no per-slider decode).
+**User Satisfaction**
+4. **Real progress bar** — Replace the current pulsing animation with an actual percentage bar fed by the `onProgress` callback from `renderOffline`. Users tolerate long waits much better when they can see measurable progress.
+5. **A/B quick-toggle playback** — A single button that instantly switches between original and processed audio at the same playback position. Far more intuitive than two separate players.
+6. **Undo/redo for slider tweaks** — Store a short history of `SliderOverrides` states so users can revert bad adjustments without re-rendering from scratch.
+7. **Preset save/load** — Let users name and save their slider + style target combinations for reuse across sessions (persisted to the database via Lovable Cloud).  
+10. **Error recovery** — If the Gemini call fails or a render is cancelled, preserve whatever partial state exists (analysis results, previous versions) instead of resetting. Let users retry from where they left off.
 
-4) Reduce rendering workload per interaction:
-- Interactive mode: render fewer variants first (Safe Baseline + primary); defer extra variants behind a quality toggle.
-- Add draft-quality audition mode (lower FFT workload) and reserve full-quality for final pass/export.
-- Make chunk yielding time-budgeted (yield every ~8–12ms budget) to prevent long blocking slices.
-
-5) Cut UI/runtime overhead:
-- Lazy-load DSP-heavy components/modules after file upload (`WaveformComparison`, `ExportSummary`, heavy DSP libs).
-- Keep icon/component imports scoped and avoid loading unused heavy UI paths at startup.
-- Simplify `analyzeAudio` to one deterministic pipeline (remove extra realtime analyzer/context path).
-
-6) Add performance gates and verification:
-- Instrument stage timings (analyze, decision, render per variant, score, validate, export).
-- Add regression thresholds: no unresponsive dialog on 3-minute stereo test, slider feedback under 300ms, first playable processed output under target latency.
-- Verify end-to-end manually with short/medium/long files and compare pre/post timing logs.
+**Recommended priority order**: Items 4, 5, 1, 8, 10 would deliver the most noticeable improvement for the least effort.
