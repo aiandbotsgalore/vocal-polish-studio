@@ -145,6 +145,38 @@ const Index = () => {
               />
             )}
 
+            {/* Variant scores */}
+            {versions.length > 1 && (
+              <div className="rounded-lg panel-gradient studio-border p-4 space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Variant Scores</p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {versions.filter(v => v.scoringResult).map((v) => (
+                    <button
+                      key={v.id}
+                      onClick={() => setCurrentVersionId(v.id)}
+                      className={`rounded-md p-3 text-left transition-all border ${
+                        v.id === currentVersionId
+                          ? "border-primary bg-primary/10 glow-primary-sm"
+                          : "border-border hover:border-muted-foreground bg-card"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-medium text-foreground">{v.label}</span>
+                        <span className={`text-sm font-bold ${
+                          (v.scoringResult?.overallScore ?? 0) >= 70 ? "text-primary" : "text-muted-foreground"
+                        }`}>
+                          {v.scoringResult?.overallScore ?? "–"}
+                        </span>
+                      </div>
+                      {v.isSafeBaseline && (
+                        <span className="text-[10px] text-muted-foreground">Safe Baseline</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Players: Original + Current only */}
             {(originalUrl || currentVersion) && (
               <div className="space-y-3">

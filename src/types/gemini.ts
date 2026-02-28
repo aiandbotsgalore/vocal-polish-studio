@@ -116,6 +116,21 @@ export interface ProcessedVersion {
   buffer: AudioBuffer;
   decision: GeminiDecision;
   clampsApplied: string[];
+  /** ScoringEngine result from VariantAudition */
+  scoringResult?: {
+    overallScore: number;
+    metrics: {
+      lufsAccuracy: number;
+      spectralBalance: number;
+      sibilanceReduction: number;
+      harshnessReduction: number;
+      brightnessPreservation: number;
+      artifactRisk: number;
+    };
+    processedLufs: number;
+    referenceDeviation: number;
+  };
+  isSafeBaseline?: boolean;
 }
 
 export interface PostRenderScore {
