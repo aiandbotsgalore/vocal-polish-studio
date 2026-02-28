@@ -1,6 +1,6 @@
 /**
  * dspEngine.ts — bridges slider overrides to the modular DSP pipeline.
- * Now uses the Web Worker for off-main-thread rendering.
+ * Single render path: all rendering goes through the Web Worker.
  */
 
 import type { GeminiDecision, SliderOverrides } from "@/types/gemini";
@@ -14,25 +14,17 @@ import { startTimer } from "./perfTimer";
 /**
  * Apply slider overrides to the Gemini decision, then render through
  * the full modular DSP chain via Web Worker (off main thread).
+ *
+ * Requires an AudioBuffer (decoded on main thread before calling).
  */
 export async function renderWithOverrides(
-  source: File | AudioBuffer,
+  source: AudioBuffer,
   decision: GeminiDecision,
   overrides: SliderOverrides,
   styleTargetKey: string = "natural",
   signal?: AbortSignal
 ): Promise<{ blob: Blob; buffer: AudioBuffer }> {
   const endTimer = startTimer("renderWithOverrides");
-
-  let sourceBuffer: AudioBuffer;
-  if (source instanceof AudioBuffer) {
-    sourceBuffer = source;
-  } else {
-    const ac = new AudioContext();
-    const ab = await source.arrayBuffer();
-    sourceBuffer = await ac.decodeAudioData(ab);
-    ac.close();
-  }
 
   const tweaked: GeminiDecision = {
     ...decision,
@@ -50,7 +42,7 @@ export async function renderWithOverrides(
   applyBrightnessOverride(slots, overrides.brightnessDb);
 
   // Render in Web Worker (off main thread)
-  const buffer = await workerRenderOffline(sourceBuffer, slots, signal);
+  const buffer = await workerRenderOffline(source, slots, signal);
   const blob = exportToWav(buffer, { bitDepth: 24 });
 
   endTimer();

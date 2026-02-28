@@ -1,15 +1,12 @@
 /**
  * DSP Web Worker — runs renderOffline, auditionVariants, and scoring
- * entirely off the main thread. Communicates via structured messages
- * with Transferable Float32Array channels for zero-copy.
+ * entirely off the main thread. Uses RawAudioData (no AudioBuffer).
  */
 
-import { renderOffline, computeNoiseProfile } from "@/lib/dsp/OfflineRenderEngine";
+import { renderOffline } from "@/lib/dsp/OfflineRenderEngine";
 import { scoreProcessedAudio } from "@/lib/dsp/ScoringEngine";
 import { validateAndCorrect } from "@/lib/dsp/SafetyRails";
-import { decisionToSlots } from "@/lib/dsp/decisionToSlots";
-import { exportToWav } from "@/lib/dsp/WavExporter";
-import type { ChainSlot, StyleProfile } from "@/lib/dsp/types";
+import { createRawAudioData, type ChainSlot, type StyleProfile } from "@/lib/dsp/types";
 import type { ScoringResult } from "@/lib/dsp/ScoringEngine";
 import type { SafetyReport } from "@/lib/dsp/SafetyRails";
 
@@ -78,33 +75,7 @@ export interface ErrorResponse {
 
 export type WorkerResponse = AuditionResponse | RenderResponse | ProgressResponse | ErrorResponse;
 
-// ── Helpers ──────────────────────────────────────────────────
-
-function reconstructBuffer(channels: Float32Array[], sampleRate: number): AudioBuffer {
-  const length = channels[0]?.length ?? 0;
-  const buf = new AudioBuffer({
-    numberOfChannels: channels.length,
-    length,
-    sampleRate,
-  });
-  for (let ch = 0; ch < channels.length; ch++) {
-    buf.copyToChannel(channels[ch] as Float32Array<ArrayBuffer>, ch);
-  }
-  return buf;
-}
-
-function extractChannels(buf: AudioBuffer): Float32Array<ArrayBuffer>[] {
-  const out: Float32Array<ArrayBuffer>[] = [];
-  for (let ch = 0; ch < buf.numberOfChannels; ch++) {
-    const src = buf.getChannelData(ch);
-    const copy = new Float32Array(src.length);
-    copy.set(src);
-    out.push(copy);
-  }
-  return out;
-}
-
-// ── Safe Baseline builder (duplicated from VariantAudition to avoid circular dep) ──
+// ── Safe Baseline builder ────────────────────────────────────
 
 function buildSafeBaselineSlots(targetLufs: number): ChainSlot[] {
   return [
@@ -158,19 +129,26 @@ async function handleRender(msg: RenderRequest) {
   abortControllers.set(msg.id, ac);
 
   try {
-    const sourceBuffer = reconstructBuffer(msg.channels, msg.sampleRate);
-    const result = await renderOffline(sourceBuffer, msg.slots, undefined, ac.signal);
-    const outChannels = extractChannels(result.buffer);
+    const source = createRawAudioData(msg.channels, msg.sampleRate);
+    const result = await renderOffline(source, msg.slots, undefined, ac.signal);
+
+    // Copy channels for transfer (originals stay with RawAudioData)
+    const outChannels = result.raw.channels.map((ch) => {
+      const copy = new Float32Array(ch.length);
+      copy.set(ch);
+      return copy;
+    });
 
     const response: RenderResponse = {
       type: "renderResult",
       id: msg.id,
       channels: outChannels,
-      sampleRate: result.buffer.sampleRate,
+      sampleRate: result.raw.sampleRate,
     };
 
     const transferables = outChannels.map((ch) => ch.buffer);
     (self as unknown as Worker).postMessage(response, transferables);
+    // outChannels are now detached — do not read them after this point
   } catch (err) {
     if ((err as Error)?.name === "AbortError") return;
     const response: ErrorResponse = {
@@ -189,7 +167,7 @@ async function handleAudition(msg: AuditionRequest) {
   abortControllers.set(msg.id, ac);
 
   try {
-    const sourceBuffer = reconstructBuffer(msg.channels, msg.sampleRate);
+    const source = createRawAudioData(msg.channels, msg.sampleRate);
     const MAX_VARIANTS = 4;
     const capped = msg.variantSlots.slice(0, MAX_VARIANTS);
 
@@ -207,7 +185,7 @@ async function handleAudition(msg: AuditionRequest) {
       const { label, slots, isSafeBaseline } = allChains[i];
 
       const renderResult = await renderOffline(
-        sourceBuffer,
+        source,
         slots,
         (p) => {
           const pct = (i + p) / totalChains;
@@ -217,21 +195,26 @@ async function handleAudition(msg: AuditionRequest) {
         ac.signal,
       );
 
-      // Safety validation (in-place)
-      const channels: Float32Array[] = [];
-      for (let ch = 0; ch < renderResult.buffer.numberOfChannels; ch++) {
-        channels.push(renderResult.buffer.getChannelData(ch));
-      }
-      const safety = validateAndCorrect(channels, renderResult.buffer.sampleRate);
+      // Safety validation (in-place on the rendered channels)
+      const safety = validateAndCorrect(renderResult.raw.channels, renderResult.raw.sampleRate);
 
-      // Score
-      const score = scoreProcessedAudio(sourceBuffer, renderResult.buffer, msg.targetLufs, msg.styleProfile);
+      // Score against original
+      const score = scoreProcessedAudio(source, renderResult.raw, msg.targetLufs, msg.styleProfile);
 
-      const outChannels = extractChannels(renderResult.buffer);
-      variants.push({ label, slots, channels: outChannels, sampleRate: renderResult.buffer.sampleRate, score, safety, isSafeBaseline });
+      // Copy channels for transfer
+      const outChannels = renderResult.raw.channels.map((ch) => {
+        const copy = new Float32Array(ch.length);
+        copy.set(ch);
+        return copy;
+      });
+
+      variants.push({
+        label, slots, channels: outChannels,
+        sampleRate: renderResult.raw.sampleRate,
+        score, safety, isSafeBaseline,
+      });
     }
 
-    // Sort by score descending
     variants.sort((a, b) => b.score.overallScore - a.score.overallScore);
 
     let recommendedIndex = variants.findIndex((r) => r.safety.passed);
@@ -247,9 +230,9 @@ async function handleAudition(msg: AuditionRequest) {
       recommendedIndex,
     };
 
-    // Transfer all channel arrays for zero-copy
     const transferables = variants.flatMap((v) => v.channels.map((ch) => ch.buffer));
     (self as unknown as Worker).postMessage(response, transferables);
+    // All variant channels are now detached
   } catch (err) {
     if ((err as Error)?.name === "AbortError") return;
     const response: ErrorResponse = {

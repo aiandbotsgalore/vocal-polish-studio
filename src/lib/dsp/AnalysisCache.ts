@@ -1,10 +1,12 @@
 /**
- * Shared analysis cache — now uses shared radix-2 FFT.
- * Reduces analysis cost by ~40-60%.
+ * LRU analysis cache keyed by RawAudioData.id (string UUID).
+ * Max 4 entries (~208 MB worst-case for 5-min stereo at 44.1 kHz).
+ * Evicts least-recently-used entry on insert when at capacity.
  */
 
 import { BANDS, type BandName } from "./frequencyBands";
 import { getHannWindow, forwardFFT, computeMagnitudes } from "./fft";
+import type { RawAudioData } from "./types";
 
 export interface CachedAnalysis {
   fftFrames: Float32Array[];
@@ -14,38 +16,66 @@ export interface CachedAnalysis {
   fftSize: number;
 }
 
-const cache = new WeakMap<AudioBuffer, CachedAnalysis>();
+const MAX_CACHE_SIZE = 4;
+
+/** LRU order — most-recently-used at the end */
+const lruOrder: string[] = [];
+const cache = new Map<string, CachedAnalysis>();
+
+function touchLru(id: string): void {
+  const idx = lruOrder.indexOf(id);
+  if (idx !== -1) lruOrder.splice(idx, 1);
+  lruOrder.push(id);
+}
+
+function evictIfNeeded(): void {
+  while (lruOrder.length > MAX_CACHE_SIZE) {
+    const evictId = lruOrder.shift()!;
+    cache.delete(evictId);
+  }
+}
 
 export function getOrComputeAnalysis(
-  buffer: AudioBuffer,
+  raw: RawAudioData,
   fftSize = 2048
 ): CachedAnalysis {
-  const existing = cache.get(buffer);
-  if (existing && existing.fftSize === fftSize) return existing;
+  const existing = cache.get(raw.id);
+  if (existing && existing.fftSize === fftSize) {
+    touchLru(raw.id);
+    return existing;
+  }
 
-  const analysis = computeAnalysis(buffer, fftSize);
-  cache.set(buffer, analysis);
+  const analysis = computeAnalysis(raw, fftSize);
+  cache.set(raw.id, analysis);
+  touchLru(raw.id);
+  evictIfNeeded();
   return analysis;
 }
 
-export function hasCachedAnalysis(buffer: AudioBuffer): boolean {
-  return cache.has(buffer);
+export function hasCachedAnalysis(id: string): boolean {
+  return cache.has(id);
 }
 
-export function invalidateCache(buffer: AudioBuffer): void {
-  cache.delete(buffer);
+export function invalidateCache(id: string): void {
+  cache.delete(id);
+  const idx = lruOrder.indexOf(id);
+  if (idx !== -1) lruOrder.splice(idx, 1);
 }
 
-function computeAnalysis(buffer: AudioBuffer, fftSize: number): CachedAnalysis {
-  const sampleRate = buffer.sampleRate;
-  const numChannels = buffer.numberOfChannels;
-  const length = buffer.length;
+/** Flush all entries — used on worker crash cleanup */
+export function flushCache(): void {
+  cache.clear();
+  lruOrder.length = 0;
+}
+
+function computeAnalysis(raw: RawAudioData, fftSize: number): CachedAnalysis {
+  const { sampleRate, numberOfChannels, length, channels } = raw;
 
   // Equal-power mono downmix
   const mono = new Float32Array(length);
-  const scale = 1 / Math.sqrt(numChannels);
-  for (let ch = 0; ch < numChannels; ch++) {
-    const chanData = buffer.getChannelData(ch);
+  const scale = 1 / Math.sqrt(numberOfChannels);
+  for (let ch = 0; ch < numberOfChannels; ch++) {
+    const chanData = channels[ch];
     for (let i = 0; i < length; i++) {
       mono[i] += chanData[i] * scale;
     }
@@ -75,7 +105,6 @@ function computeAnalysis(buffer: AudioBuffer, fftSize: number): CachedAnalysis {
 
     forwardFFT(re, im);
     const magnitudes = computeMagnitudes(re, im, numBins);
-    // Normalize
     for (let k = 0; k < numBins; k++) magnitudes[k] /= fftSize;
 
     fftFrames.push(magnitudes);
