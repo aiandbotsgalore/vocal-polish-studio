@@ -18,7 +18,7 @@ import { callGemini, clearBase64Cache } from "@/lib/geminiClient";
 import { applySafetyClamps } from "@/lib/safetyClamps";
 import { renderWithOverrides } from "@/lib/dspEngine";
 import { validateRender } from "@/lib/postRenderValidation";
-import { auditionVariants, type AuditionResult } from "@/lib/dsp/VariantAudition";
+import { workerAuditionVariants, type WorkerAuditionResult } from "@/lib/dsp/WorkerRenderer";
 import { decisionToSlots } from "@/lib/dsp/decisionToSlots";
 import { exportToWav, downloadWav } from "@/lib/dsp/WavExporter";
 import { getStyleProfile } from "@/lib/dsp/StyleProfiles";
@@ -166,9 +166,10 @@ export function useAudioEngine() {
         variantSlots.push(decisionToSlots(altClamped, targetLufs));
       }
 
-      const auditionResult: AuditionResult = await auditionVariants(
+      const auditionResult: WorkerAuditionResult = await workerAuditionVariants(
         originalBuffer, variantSlots, targetLufs, profile,
         (pct) => setRenderProgress(Math.round(pct * 100)),
+        signal,
       );
 
       if (signal.aborted) return;
@@ -264,7 +265,7 @@ export function useAudioEngine() {
       const targetLufs = profile.targetLufs;
       const geminiSlots = decisionToSlots(clamped, targetLufs);
 
-      const auditionResult = await auditionVariants(originalBuffer, [geminiSlots], targetLufs, profile);
+      const auditionResult = await workerAuditionVariants(originalBuffer, [geminiSlots], targetLufs, profile);
 
       const best = auditionResult.variants[auditionResult.recommendedIndex];
       const blob = exportToWav(best.buffer, { bitDepth: 16 });

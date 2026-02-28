@@ -1,11 +1,11 @@
 /**
  * dspEngine.ts — bridges slider overrides to the modular DSP pipeline.
- * Perf: Accepts pre-decoded AudioBuffer to avoid redundant decoding.
+ * Now uses the Web Worker for off-main-thread rendering.
  */
 
 import type { GeminiDecision, SliderOverrides } from "@/types/gemini";
 import { decisionToSlots } from "./dsp/decisionToSlots";
-import { renderOffline } from "./dsp/OfflineRenderEngine";
+import { workerRenderOffline } from "./dsp/WorkerRenderer";
 import { exportToWav } from "./dsp/WavExporter";
 import { getStyleProfile } from "./dsp/StyleProfiles";
 import type { ChainSlot } from "./dsp/types";
@@ -13,8 +13,7 @@ import { startTimer } from "./perfTimer";
 
 /**
  * Apply slider overrides to the Gemini decision, then render through
- * the full modular DSP chain.
- * Accepts either a File or a pre-decoded AudioBuffer to avoid redundant decoding.
+ * the full modular DSP chain via Web Worker (off main thread).
  */
 export async function renderWithOverrides(
   source: File | AudioBuffer,
@@ -50,11 +49,12 @@ export async function renderWithOverrides(
   const slots = decisionToSlots(tweaked, targetLufs);
   applyBrightnessOverride(slots, overrides.brightnessDb);
 
-  const result = await renderOffline(sourceBuffer, slots, undefined, signal);
-  const blob = exportToWav(result.buffer, { bitDepth: 24 });
+  // Render in Web Worker (off main thread)
+  const buffer = await workerRenderOffline(sourceBuffer, slots, signal);
+  const blob = exportToWav(buffer, { bitDepth: 24 });
 
   endTimer();
-  return { blob, buffer: result.buffer };
+  return { blob, buffer };
 }
 
 function applyBrightnessOverride(slots: ChainSlot[], brightnessDb: number) {
