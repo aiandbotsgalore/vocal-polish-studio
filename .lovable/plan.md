@@ -27,3 +27,4 @@
 - Build contents with `file_data: { mime_type, file_uri }` instead of `inlineData`
 - Wrap Gemini call in `try/finally` calling `deleteFile`
 
+### STATUS: ✅ IMPLEMENTED
