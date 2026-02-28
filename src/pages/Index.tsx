@@ -2,7 +2,7 @@ import { lazy, Suspense } from "react";
 import { useAudioEngine } from "@/hooks/useAudioEngine";
 import { FileUploadCard } from "@/components/FileUploadCard";
 import { AnalysisReport } from "@/components/AnalysisReport";
-import { AudioPlayerPanel } from "@/components/AudioPlayerPanel";
+import { ABTogglePlayer } from "@/components/ABTogglePlayer";
 import { LiveSliders } from "@/components/LiveSliders";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ModeSelector } from "@/components/ModeSelector";
@@ -11,6 +11,7 @@ import { AutonomyPanel } from "@/components/AutonomyPanel";
 import { FeedbackButtons } from "@/components/FeedbackButtons";
 import { RevisionHistory } from "@/components/RevisionHistory";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import { Activity, Sparkles, Download, AlertTriangle, XCircle } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -45,6 +46,7 @@ const Index = () => {
     feedbackHistory,
     exportFile,
     cancelProcessing,
+    renderProgress,
   } = useAudioEngine();
 
   const busy = status === "analyzing" || status === "calling_gemini" || status === "fixing" || status === "validating";
@@ -123,18 +125,22 @@ const Index = () => {
                 <div className="absolute inset-0 rounded-full border-2 border-primary/30 border-t-primary animate-spin" />
                 <Sparkles className="h-3.5 w-3.5 text-primary" />
               </div>
-              <div>
+              <div className="flex-1">
                 <p className="text-sm font-semibold text-foreground">
                   {status === "analyzing" ? "Analyzing audio…" : status === "calling_gemini" ? "Consulting Gemini AI…" : status === "fixing" ? "Rendering audio…" : "Validating output…"}
                 </p>
                 <p className="text-[11px] text-muted-foreground">
-                  {status === "analyzing" ? "Measuring harshness, sibilance & frequency profile" : status === "calling_gemini" ? "AI is deciding optimal EQ, de-essing & processing strategy" : status === "fixing" ? "Applying DSP chain to your vocal" : "Comparing before & after metrics"}
+                  {status === "analyzing" ? "Measuring harshness, sibilance & frequency profile" : status === "calling_gemini" ? "AI is deciding optimal EQ, de-essing & processing strategy" : status === "fixing" ? `Applying DSP chain to your vocal — ${renderProgress}%` : "Comparing before & after metrics"}
                 </p>
               </div>
             </div>
-            <div className="h-1 w-full overflow-hidden rounded-full bg-secondary">
-              <div className="h-full rounded-full bg-primary/70 w-1/3 animate-[pulse_1.5s_ease-in-out_infinite]" />
-            </div>
+            {status === "fixing" ? (
+              <Progress value={renderProgress} className="h-1.5" />
+            ) : (
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+                <div className="h-full rounded-full bg-primary/70 w-1/3 animate-[pulse_1.5s_ease-in-out_infinite]" />
+              </div>
+            )}
           </div>
         )}
 
@@ -145,6 +151,9 @@ const Index = () => {
             <div>
               <p className="text-sm font-medium text-destructive">AI analysis didn't complete</p>
               <p className="text-xs text-destructive/80 mt-1">{geminiError.details || "Please check your connection and try again."}</p>
+              {analysis && (
+                <p className="text-xs text-muted-foreground mt-2">Your audio analysis is preserved — you can retry without re-uploading.</p>
+              )}
             </div>
           </div>
         )}
@@ -194,14 +203,12 @@ const Index = () => {
               </div>
             )}
 
-            {(originalUrl || currentVersion) && (
-              <div className="space-y-3">
-                <AudioPlayerPanel label="Before (Original)" url={originalUrl} />
-                {currentVersion && (
-                  <AudioPlayerPanel label={currentVersion.label} url={currentVersion.url} accent />
-                )}
-              </div>
-            )}
+            {/* A/B Toggle Player */}
+            <ABTogglePlayer
+              originalUrl={originalUrl}
+              processedUrl={currentVersion?.url ?? null}
+              processedLabel={currentVersion?.label}
+            />
 
             {/* Lazy-loaded waveform */}
             {(originalBuffer || currentVersion) && (
