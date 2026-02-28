@@ -1,8 +1,6 @@
 /**
  * dspEngine.ts — bridges slider overrides to the modular DSP pipeline.
- *
- * renderWithOverrides now builds a full ChainSlot[] via decisionToSlots,
- * applies slider tweaks, then renders through OfflineRenderEngine.
+ * Perf: Accepts pre-decoded AudioBuffer to avoid redundant decoding.
  */
 
 import type { GeminiDecision, SliderOverrides } from "@/types/gemini";
@@ -11,24 +9,32 @@ import { renderOffline } from "./dsp/OfflineRenderEngine";
 import { exportToWav } from "./dsp/WavExporter";
 import { getStyleProfile } from "./dsp/StyleProfiles";
 import type { ChainSlot } from "./dsp/types";
+import { startTimer } from "./perfTimer";
 
 /**
  * Apply slider overrides to the Gemini decision, then render through
  * the full modular DSP chain.
+ * Accepts either a File or a pre-decoded AudioBuffer to avoid redundant decoding.
  */
 export async function renderWithOverrides(
-  file: File,
+  source: File | AudioBuffer,
   decision: GeminiDecision,
   overrides: SliderOverrides,
-  styleTargetKey: string = "natural"
+  styleTargetKey: string = "natural",
+  signal?: AbortSignal
 ): Promise<{ blob: Blob; buffer: AudioBuffer }> {
-  // Decode source
-  const ac = new AudioContext();
-  const ab = await file.arrayBuffer();
-  const sourceBuffer = await ac.decodeAudioData(ab);
-  ac.close();
+  const endTimer = startTimer("renderWithOverrides");
 
-  // Build tweaked decision from overrides
+  let sourceBuffer: AudioBuffer;
+  if (source instanceof AudioBuffer) {
+    sourceBuffer = source;
+  } else {
+    const ac = new AudioContext();
+    const ab = await source.arrayBuffer();
+    sourceBuffer = await ac.decodeAudioData(ab);
+    ac.close();
+  }
+
   const tweaked: GeminiDecision = {
     ...decision,
     eqBellCutDb: decision.eqBellCutDb * (overrides.harshnessPct / 100),
@@ -39,26 +45,18 @@ export async function renderWithOverrides(
     outputTrimDb: overrides.outputDb,
   };
 
-  // Resolve style profile for target LUFS
   const profile = getStyleProfile(styleTargetKey as any);
   const targetLufs = profile.targetLufs;
-
-  // Build chain slots from tweaked decision
   const slots = decisionToSlots(tweaked, targetLufs);
-
-  // Apply brightness override: adjust presenceShaper
   applyBrightnessOverride(slots, overrides.brightnessDb);
 
-  // Render through modular pipeline
-  const result = await renderOffline(sourceBuffer, slots);
+  const result = await renderOffline(sourceBuffer, slots, undefined, signal);
   const blob = exportToWav(result.buffer, { bitDepth: 24 });
 
+  endTimer();
   return { blob, buffer: result.buffer };
 }
 
-/**
- * Modify presenceShaper slot to apply brightness/air adjustment.
- */
 function applyBrightnessOverride(slots: ChainSlot[], brightnessDb: number) {
   const presenceSlot = slots.find((s) => s.id === "presenceShaper");
   if (!presenceSlot) return;
