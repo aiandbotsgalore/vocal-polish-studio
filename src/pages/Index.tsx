@@ -1,8 +1,8 @@
+import { lazy, Suspense } from "react";
 import { useAudioEngine } from "@/hooks/useAudioEngine";
 import { FileUploadCard } from "@/components/FileUploadCard";
 import { AnalysisReport } from "@/components/AnalysisReport";
 import { AudioPlayerPanel } from "@/components/AudioPlayerPanel";
-import { WaveformComparison } from "@/components/WaveformComparison";
 import { LiveSliders } from "@/components/LiveSliders";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ModeSelector } from "@/components/ModeSelector";
@@ -10,9 +10,15 @@ import { StyleTargetSelector } from "@/components/StyleTargetSelector";
 import { AutonomyPanel } from "@/components/AutonomyPanel";
 import { FeedbackButtons } from "@/components/FeedbackButtons";
 import { RevisionHistory } from "@/components/RevisionHistory";
-import { ExportSummary } from "@/components/ExportSummary";
 import { Button } from "@/components/ui/button";
-import { Activity, Sparkles, Download, AlertTriangle } from "lucide-react";
+import { Activity, Sparkles, Download, AlertTriangle, XCircle } from "lucide-react";
+import { Skeleton } from "@/components/ui/skeleton";
+
+// Lazy-load heavy components
+const WaveformComparison = lazy(() => import("@/components/WaveformComparison").then(m => ({ default: m.WaveformComparison })));
+const ExportSummary = lazy(() => import("@/components/ExportSummary").then(m => ({ default: m.ExportSummary })));
+
+const LazyFallback = () => <Skeleton className="h-32 w-full rounded-lg" />;
 
 const Index = () => {
   const {
@@ -38,6 +44,7 @@ const Index = () => {
     sendFeedback,
     feedbackHistory,
     exportFile,
+    cancelProcessing,
   } = useAudioEngine();
 
   const busy = status === "analyzing" || status === "calling_gemini" || status === "fixing" || status === "validating";
@@ -86,6 +93,17 @@ const Index = () => {
             <Activity className="h-4 w-4" />
             {status === "fixing" ? "Rendering…" : "Auto Fix"}
           </Button>
+          {busy && (
+            <Button
+              onClick={cancelProcessing}
+              variant="destructive"
+              size="sm"
+              className="gap-2"
+            >
+              <XCircle className="h-4 w-4" />
+              Cancel
+            </Button>
+          )}
           <Button
             onClick={exportFile}
             disabled={!currentVersion}
@@ -98,7 +116,7 @@ const Index = () => {
         </div>
 
         {/* Progress indicator */}
-        {(status === "analyzing" || status === "calling_gemini" || status === "fixing" || status === "validating") && (
+        {busy && (
           <div className="rounded-lg panel-gradient studio-border p-5 space-y-3">
             <div className="flex items-center gap-3">
               <div className="relative flex h-8 w-8 items-center justify-center shrink-0">
@@ -134,7 +152,6 @@ const Index = () => {
         {/* Two column layout */}
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="lg:col-span-2 space-y-6">
-            {/* Analysis Report */}
             {(analysis || geminiDecision || geminiError) && (
               <AnalysisReport
                 analysis={analysis || undefined}
@@ -146,7 +163,6 @@ const Index = () => {
               />
             )}
 
-            {/* Variant scores */}
             {versions.length > 1 && (
               <div className="rounded-lg panel-gradient studio-border p-4 space-y-2">
                 <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Variant Scores</p>
@@ -178,7 +194,6 @@ const Index = () => {
               </div>
             )}
 
-            {/* Players: Original + Current only */}
             {(originalUrl || currentVersion) && (
               <div className="space-y-3">
                 <AudioPlayerPanel label="Before (Original)" url={originalUrl} />
@@ -188,15 +203,16 @@ const Index = () => {
               </div>
             )}
 
-            {/* Waveform A/B */}
+            {/* Lazy-loaded waveform */}
             {(originalBuffer || currentVersion) && (
-              <WaveformComparison
-                originalBuffer={originalBuffer}
-                processedBuffer={currentVersion?.buffer || null}
-              />
+              <Suspense fallback={<LazyFallback />}>
+                <WaveformComparison
+                  originalBuffer={originalBuffer}
+                  processedBuffer={currentVersion?.buffer || null}
+                />
+              </Suspense>
             )}
 
-            {/* Live Sliders */}
             {currentVersion && geminiDecision && (
               <LiveSliders
                 decision={geminiDecision}
@@ -205,7 +221,6 @@ const Index = () => {
               />
             )}
 
-            {/* Feedback */}
             {versions.length > 0 && (
               <div className="space-y-3">
                 <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Feedback</p>
@@ -234,15 +249,17 @@ const Index = () => {
             )}
 
             {currentVersion && geminiDecision && (
-              <ExportSummary
-                mode={mode}
-                styleTarget={styleTarget}
-                modelUsed={modelUsed}
-                decision={currentVersion.decision}
-                clampsApplied={currentVersion.clampsApplied}
-                score={currentVersionId ? postRenderScores[currentVersionId] : undefined}
-                analysis={analysis}
-              />
+              <Suspense fallback={<LazyFallback />}>
+                <ExportSummary
+                  mode={mode}
+                  styleTarget={styleTarget}
+                  modelUsed={modelUsed}
+                  decision={currentVersion.decision}
+                  clampsApplied={currentVersion.clampsApplied}
+                  score={currentVersionId ? postRenderScores[currentVersionId] : undefined}
+                  analysis={analysis}
+                />
+              </Suspense>
             )}
           </div>
         </div>

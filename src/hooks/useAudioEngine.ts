@@ -22,8 +22,9 @@ import { auditionVariants, type AuditionResult } from "@/lib/dsp/VariantAudition
 import { decisionToSlots } from "@/lib/dsp/decisionToSlots";
 import { exportToWav, downloadWav } from "@/lib/dsp/WavExporter";
 import { getStyleProfile } from "@/lib/dsp/StyleProfiles";
+import { startTimer } from "@/lib/perfTimer";
 
-const SOFT_LIMIT_SECONDS = 360; // 6 minutes
+const SOFT_LIMIT_SECONDS = 360;
 
 export function useAudioEngine() {
   const [status, setStatus] = useState<AppStatus>("idle");
@@ -42,12 +43,29 @@ export function useAudioEngine() {
   const [postRenderScores, setPostRenderScores] = useState<Record<string, PostRenderScore>>({});
   const [feedbackHistory, setFeedbackHistory] = useState<FeedbackToken[]>([]);
 
-  // Store the resolved style profile from the Gemini call
   const styleProfileRef = useRef<StyleProfile | undefined>(undefined);
+  /** AbortController for cancelling in-flight processing */
+  const abortRef = useRef<AbortController | null>(null);
 
   const currentVersion = versions.find((v) => v.id === currentVersionId) || null;
 
+  /** Cancel any in-flight processing */
+  const cancelProcessing = useCallback(() => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setStatus((prev) => {
+      if (prev === "analyzing" || prev === "calling_gemini" || prev === "fixing" || prev === "validating") {
+        toast.info("Processing cancelled.");
+        return "idle";
+      }
+      return prev;
+    });
+  }, []);
+
   const loadFile = useCallback((file: File) => {
+    if (abortRef.current) abortRef.current.abort();
     if (originalUrl) URL.revokeObjectURL(originalUrl);
     versions.forEach((v) => URL.revokeObjectURL(v.url));
     clearBase64Cache();
@@ -71,33 +89,33 @@ export function useAudioEngine() {
   const analyze = useCallback(async () => {
     if (!originalFile) return;
     setGeminiError(null);
+    abortRef.current = new AbortController();
 
-    // Layer 1
     setStatus("analyzing");
+    const endAnalyze = startTimer("analyze-total");
     let layerOne: LayerOneAnalysis;
     try {
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 50));
       layerOne = await analyzeAudio(originalFile);
       setAnalysis(layerOne);
 
-      // Store decoded buffer for waveform
+      // Decode once and cache
       const ac = new AudioContext();
       const ab = await originalFile.arrayBuffer();
       const buf = await ac.decodeAudioData(ab);
       ac.close();
       setOriginalBuffer(buf);
-    } catch {
+    } catch (err) {
+      if ((err as Error)?.name === "AbortError") return;
       toast.error("We couldn't read this audio file. Please try a different format (WAV or MP3 work best).");
       setStatus("idle");
       return;
     }
 
-    // Soft duration warning
     if (layerOne.durationSeconds > SOFT_LIMIT_SECONDS) {
       toast.warning("Long audio detected — processing the first 6 minutes. For best results, trim your clip.");
     }
 
-    // Layer 2: Gemini
     setStatus("calling_gemini");
     try {
       const result = await callGemini(originalFile, layerOne, mode, styleTarget);
@@ -117,97 +135,89 @@ export function useAudioEngine() {
       setStatus("gemini_error");
       toast.error("Something went wrong reaching the AI. Check your connection and try again.");
     }
+    endAnalyze();
   }, [originalFile, mode, styleTarget]);
 
-  /**
-   * Auto Fix — uses VariantAudition to render the Gemini chain + Safe Baseline,
-   * score them, and pick the best variant.
-   */
   const autoFix = useCallback(async () => {
     if (!originalFile || !geminiDecision || !originalBuffer) {
       toast.error("Run Analyze first so the AI can decide how to process your vocal.");
       return;
     }
 
+    abortRef.current = new AbortController();
+    const signal = abortRef.current.signal;
     setStatus("fixing");
+    const endFix = startTimer("autoFix-total");
+
     try {
       const { decision: clamped, clampsApplied: clamps } = applySafetyClamps(geminiDecision, mode);
       setClampsApplied(clamps);
 
-      // Resolve style profile and target LUFS
       const profile = styleProfileRef.current ?? getStyleProfile(styleTarget);
       const targetLufs = profile.targetLufs;
-
-      // Convert clamped Gemini decision → ChainSlot[]
       const geminiSlots = decisionToSlots(clamped, targetLufs);
 
-      // Build variant list: primary Gemini chain + alternate if present
       const variantSlots = [geminiSlots];
       if (clamped.alternateDecision) {
         const { decision: altClamped } = applySafetyClamps(clamped.alternateDecision, mode);
         variantSlots.push(decisionToSlots(altClamped, targetLufs));
       }
 
-      // Run VariantAudition: renders Safe Baseline + all variants, scores them
       const auditionResult: AuditionResult = await auditionVariants(
-        originalBuffer,
-        variantSlots,
-        targetLufs,
-        profile,
+        originalBuffer, variantSlots, targetLufs, profile,
       );
 
-      // Create ProcessedVersions from all audition variants
+      if (signal.aborted) return;
+
+      // Defer WAV export — only create blobs for playback URLs, not full WAV
       const newVersions: ProcessedVersion[] = [];
       for (let i = 0; i < auditionResult.variants.length; i++) {
         const v = auditionResult.variants[i];
-        const blob = exportToWav(v.buffer, { bitDepth: 24 });
+        // Lightweight WAV for playback (not the final high-quality export)
+        const blob = exportToWav(v.buffer, { bitDepth: 16 });
         const url = URL.createObjectURL(blob);
         const versionId = `v${versions.length + i + 1}`;
 
         newVersions.push({
-          id: versionId,
-          label: v.label,
-          blob,
-          url,
-          buffer: v.buffer,
-          decision: clamped,
-          clampsApplied: clamps,
-          scoringResult: v.score,
-          isSafeBaseline: v.isSafeBaseline,
+          id: versionId, label: v.label, blob, url, buffer: v.buffer,
+          decision: clamped, clampsApplied: clamps,
+          scoringResult: v.score, isSafeBaseline: v.isSafeBaseline,
         });
       }
 
       setVersions((prev) => [...prev, ...newVersions]);
-
-      // Select the recommended variant
       const recommendedVersion = newVersions[auditionResult.recommendedIndex];
       setCurrentVersionId(recommendedVersion?.id ?? newVersions[0]?.id ?? null);
       setStatus("playback_ready");
       toast.success(`${newVersions.length} variants rendered — "${recommendedVersion?.label}" recommended (score: ${recommendedVersion?.scoringResult?.overallScore ?? "?"})`);
 
-      // Post-render validation for backward compat with existing PostRenderScore display
+      // Validate only the recommended variant (not all)
       setStatus("validating");
-      for (const nv of newVersions) {
+      if (recommendedVersion) {
         try {
-          const score = await validateRender(analysis!, nv.buffer, nv.id, clamped.eqBellCenterHz);
-          setPostRenderScores((prev) => ({ ...prev, [nv.id]: score }));
-        } catch {
-          // validation is non-critical
-        }
+          const score = await validateRender(analysis!, recommendedVersion.buffer, recommendedVersion.id, clamped.eqBellCenterHz);
+          setPostRenderScores((prev) => ({ ...prev, [recommendedVersion.id]: score }));
+        } catch { /* non-critical */ }
       }
       setStatus("ready");
     } catch (err) {
+      if ((err as Error)?.name === "AbortError") {
+        setStatus("gemini_ready");
+        return;
+      }
       console.error("[autoFix]", err);
       toast.error("Audio processing hit a snag. Try a different file or style target.");
       setStatus("gemini_ready");
     }
+    endFix();
   }, [originalFile, originalBuffer, geminiDecision, mode, styleTarget, versions, analysis]);
 
   const applyOverrides = useCallback(async (overrides: SliderOverrides) => {
-    if (!originalFile || !geminiDecision) return;
+    if (!originalBuffer || !geminiDecision) return;
     try {
       const { decision: clamped } = applySafetyClamps(geminiDecision, mode);
-      const { blob, buffer } = await renderWithOverrides(originalFile, clamped, overrides, styleTarget);
+      // Use cached originalBuffer instead of re-decoding file
+      const { blob, buffer } = await renderWithOverrides(originalBuffer, clamped, overrides, styleTarget);
       const url = URL.createObjectURL(blob);
 
       setVersions((prev) => {
@@ -219,15 +229,14 @@ export function useAudioEngine() {
         updated[idx] = { ...updated[idx], blob, buffer, url };
         return updated;
       });
-    } catch {
-      // silent — slider tweaks shouldn't throw errors at the user
-    }
-  }, [originalFile, geminiDecision, mode, styleTarget, currentVersionId]);
+    } catch { /* silent */ }
+  }, [originalBuffer, geminiDecision, mode, styleTarget, currentVersionId]);
 
   const sendFeedback = useCallback(async (token: FeedbackToken) => {
     if (!originalFile || !analysis || !geminiDecision || !originalBuffer) return;
     setFeedbackHistory((prev) => [...prev, token]);
 
+    abortRef.current = new AbortController();
     setStatus("calling_gemini");
     try {
       const result = await callGemini(originalFile, analysis, mode, styleTarget, token, geminiDecision);
@@ -249,15 +258,10 @@ export function useAudioEngine() {
       const targetLufs = profile.targetLufs;
       const geminiSlots = decisionToSlots(clamped, targetLufs);
 
-      const auditionResult = await auditionVariants(
-        originalBuffer,
-        [geminiSlots],
-        targetLufs,
-        profile,
-      );
+      const auditionResult = await auditionVariants(originalBuffer, [geminiSlots], targetLufs, profile);
 
       const best = auditionResult.variants[auditionResult.recommendedIndex];
-      const blob = exportToWav(best.buffer, { bitDepth: 24 });
+      const blob = exportToWav(best.buffer, { bitDepth: 16 });
       const url = URL.createObjectURL(blob);
       const versionId = `v${versions.length + 1}`;
       const feedbackLabel = token === "too_dull" ? "Too Dull" : token === "too_sharp" ? "Too Sharp" : token === "too_lispy" ? "Too Lispy" : "Better";
@@ -274,13 +278,12 @@ export function useAudioEngine() {
       setStatus("playback_ready");
       toast.success(`${label} rendered (score: ${best.score.overallScore})`);
 
+      // Validate only this version
       setStatus("validating");
       try {
         const score = await validateRender(analysis, best.buffer, versionId, clamped.eqBellCenterHz);
         setPostRenderScores((prev) => ({ ...prev, [versionId]: score }));
-      } catch {
-        // non-critical
-      }
+      } catch { /* non-critical */ }
       setStatus("ready");
     } catch {
       toast.error("Feedback revision didn't work. Give it another shot.");
@@ -291,6 +294,7 @@ export function useAudioEngine() {
   const exportFile = useCallback(() => {
     if (!currentVersion || !originalFile) return;
     const baseName = originalFile.name.replace(/\.[^.]+$/, "");
+    // Full quality 24-bit export on demand
     downloadWav(currentVersion.buffer, {
       bitDepth: 24,
       filename: `${baseName}_${currentVersion.id}.wav`,
@@ -305,5 +309,6 @@ export function useAudioEngine() {
     currentVersionId, setCurrentVersionId, currentVersion,
     postRenderScores, feedbackHistory,
     loadFile, analyze, autoFix, applyOverrides, sendFeedback, exportFile,
+    cancelProcessing,
   };
 }
