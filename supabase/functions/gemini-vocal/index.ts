@@ -152,6 +152,22 @@ serve(async (req) => {
     promptText += `## Settings\n- Mode: ${mode === "safe" ? "Safe (conservative, minimal intervention)" : "Unleashed (broad authority, aggressive allowed)"}\n`;
     promptText += `- Style Target: ${styleTarget}\n`;
 
+    // ── Style profile reference data ──
+    const STYLE_PROFILE_DATA: Record<string, { bandRatios: Record<string, number>; centroidRange: [number, number]; targetLufs: number; noiseTolerance: string }> = {
+      natural: { bandRatios: { rumble: 0.03, plosive: 0.06, mud: 0.15, lowMid: 0.32, presence: 0.22, harshness: 0.10, sibilance: 0.07, air: 0.05 }, centroidRange: [1400, 3600], targetLufs: -16, noiseTolerance: "High" },
+      podcast_clean: { bandRatios: { rumble: 0.01, plosive: 0.04, mud: 0.12, lowMid: 0.35, presence: 0.25, harshness: 0.10, sibilance: 0.08, air: 0.05 }, centroidRange: [1800, 3200], targetLufs: -16, noiseTolerance: "Moderate" },
+      warm_smooth: { bandRatios: { rumble: 0.02, plosive: 0.05, mud: 0.16, lowMid: 0.36, presence: 0.20, harshness: 0.08, sibilance: 0.07, air: 0.06 }, centroidRange: [1400, 2600], targetLufs: -16, noiseTolerance: "Moderate" },
+      modern_bright: { bandRatios: { rumble: 0.01, plosive: 0.04, mud: 0.08, lowMid: 0.28, presence: 0.30, harshness: 0.13, sibilance: 0.09, air: 0.07 }, centroidRange: [2500, 4200], targetLufs: -14, noiseTolerance: "Moderate" },
+      presence_forward: { bandRatios: { rumble: 0.01, plosive: 0.04, mud: 0.09, lowMid: 0.28, presence: 0.32, harshness: 0.12, sibilance: 0.08, air: 0.06 }, centroidRange: [2400, 4000], targetLufs: -14, noiseTolerance: "Low" },
+      aggressive: { bandRatios: { rumble: 0.02, plosive: 0.06, mud: 0.08, lowMid: 0.25, presence: 0.30, harshness: 0.14, sibilance: 0.09, air: 0.06 }, centroidRange: [2800, 4500], targetLufs: -12, noiseTolerance: "High" },
+    };
+
+    const profile = STYLE_PROFILE_DATA[styleTarget] || STYLE_PROFILE_DATA.natural;
+    const bandLines = Object.entries(profile.bandRatios)
+      .map(([band, ratio]) => `  - ${band}: ${(ratio * 100).toFixed(1)}%`)
+      .join("\n");
+    promptText += `\n## Active Style Profile Reference\nTarget spectral balance (band energy ratios):\n${bandLines}\nSpectral centroid target range: ${profile.centroidRange[0]}–${profile.centroidRange[1]} Hz\nTarget integrated loudness: ${profile.targetLufs} LUFS\nNoise tolerance: ${profile.noiseTolerance}\n\nPrioritize achieving this spectral shape and loudness target. Adjust EQ, compression, and de-essing parameters to match these reference ratios while respecting safety limits.\n`;
+
     if (feedback) {
       promptText += `\n## User Feedback on Previous Version\nFeedback: ${feedback}\nPlease adjust the decision accordingly while maintaining safety limits.\n`;
     }
