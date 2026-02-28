@@ -1,9 +1,9 @@
 /**
- * OfflineRenderEngine — renders a ChainSlot[] config against an AudioBuffer.
+ * OfflineRenderEngine — renders a ChainSlot[] config against RawAudioData.
  *
- * Fix 12: Validates plugin order before rendering; rejects mismatched chains.
- * Perf: Time-budgeted yielding (8ms budget) instead of yield-every-chunk.
- * Perf: Uses shared radix-2 FFT for noise profiling.
+ * Worker-safe: no AudioBuffer dependency.
+ * Uses time-budgeted yielding (8 ms budget) for UI responsiveness.
+ * Uses shared radix-2 FFT for noise profiling.
  */
 
 import { SignalChain } from "./SignalChain";
@@ -12,16 +12,14 @@ import {
   type ChainSlot,
   type ProcessContext,
   type NoiseProfile,
-  type PluginId,
+  type RawAudioData,
+  createRawAudioData,
 } from "./types";
 import { DenoiseLite } from "./plugins/DenoiseLite";
 import { getHannWindow, forwardFFT, computeMagnitudes } from "./fft";
 import { startTimer } from "../perfTimer";
 
-/** Chunk size for offline render */
 const RENDER_CHUNK = 8192;
-
-/** Time budget per JS task before yielding (ms) */
 const YIELD_BUDGET_MS = 8;
 
 export function validatePluginOrder(slots: ChainSlot[]): boolean {
@@ -38,32 +36,29 @@ export function validatePluginOrder(slots: ChainSlot[]): boolean {
 }
 
 /**
- * Pre-pass noise profiling using shared FFT.
+ * Pre-pass noise profiling using shared FFT. Accepts RawAudioData.
  */
 export function computeNoiseProfile(
-  buffer: AudioBuffer,
+  raw: RawAudioData,
   fftSize = 2048
 ): NoiseProfile {
-  const sampleRate = buffer.sampleRate;
-  const numChannels = buffer.numberOfChannels;
-  const analysisLength = Math.min(Math.round(sampleRate * 0.5), buffer.length);
+  const { sampleRate, numberOfChannels, channels } = raw;
+  const analysisLength = Math.min(Math.round(sampleRate * 0.5), raw.length);
 
   const mono = new Float32Array(analysisLength);
-  const scale = 1 / Math.sqrt(numChannels);
-  for (let ch = 0; ch < numChannels; ch++) {
-    const data = buffer.getChannelData(ch);
+  const scale = 1 / Math.sqrt(numberOfChannels);
+  for (let ch = 0; ch < numberOfChannels; ch++) {
+    const data = channels[ch];
     for (let i = 0; i < analysisLength; i++) {
       mono[i] += data[i] * scale;
     }
   }
 
-  // RMS noise floor
   let sumSq = 0;
   for (let i = 0; i < analysisLength; i++) sumSq += mono[i] * mono[i];
   const rms = Math.sqrt(sumSq / analysisLength);
   const floorDb = rms > 0 ? 20 * Math.log10(rms) : -96;
 
-  // Spectral analysis with shared FFT
   const numBins = fftSize / 2 + 1;
   const hopSize = fftSize / 2;
   const numFrames = Math.max(1, Math.floor((analysisLength - fftSize) / hopSize) + 1);
@@ -108,18 +103,18 @@ export function computeNoiseProfile(
 }
 
 export interface RenderResult {
-  buffer: AudioBuffer;
+  raw: RawAudioData;
   chainValid: boolean;
   noiseProfile: NoiseProfile;
 }
 
 /**
- * Render a chain configuration against an AudioBuffer.
+ * Render a chain configuration against RawAudioData.
  * Uses time-budgeted yielding for UI responsiveness.
  * Supports cancellation via AbortSignal.
  */
 export async function renderOffline(
-  sourceBuffer: AudioBuffer,
+  source: RawAudioData,
   slots: ChainSlot[],
   onProgress?: (pct: number) => void,
   signal?: AbortSignal
@@ -131,16 +126,16 @@ export async function renderOffline(
     console.error("[OfflineRenderEngine] Plugin order mismatch — rejecting chain.");
     endTimer();
     return {
-      buffer: copyBuffer(sourceBuffer),
+      raw: copyRaw(source),
       chainValid: false,
       noiseProfile: { floorDb: -96, flatness: 0, spectrum: new Float32Array(0) },
     };
   }
 
-  const noiseProfile = computeNoiseProfile(sourceBuffer);
+  const noiseProfile = computeNoiseProfile(source);
 
   const ctx: ProcessContext = {
-    sampleRate: sourceBuffer.sampleRate,
+    sampleRate: source.sampleRate,
     blockSize: RENDER_CHUNK,
     noiseProfile,
   };
@@ -153,19 +148,18 @@ export async function renderOffline(
     (denoise as DenoiseLite).setNoiseProfile(noiseProfile);
   }
 
-  const numChannels = sourceBuffer.numberOfChannels;
-  const length = sourceBuffer.length;
+  const { numberOfChannels, length, channels: srcChannels } = source;
   const channels: Float32Array[] = [];
-  for (let ch = 0; ch < numChannels; ch++) {
-    channels.push(new Float32Array(sourceBuffer.getChannelData(ch)));
+  for (let ch = 0; ch < numberOfChannels; ch++) {
+    const copy = new Float32Array(srcChannels[ch].length);
+    copy.set(srcChannels[ch]);
+    channels.push(copy);
   }
 
-  // Time-budgeted chunk processing
   let processed = 0;
   let lastYield = performance.now();
 
   while (processed < length) {
-    // Check cancellation
     if (signal?.aborted) {
       endTimer();
       throw new DOMException("Render cancelled", "AbortError");
@@ -178,7 +172,6 @@ export async function renderOffline(
 
     if (onProgress) onProgress(processed / length);
 
-    // Yield only when time budget exceeded
     const now = performance.now();
     if (now - lastYield > YIELD_BUDGET_MS) {
       await yieldToEventLoop();
@@ -186,29 +179,19 @@ export async function renderOffline(
     }
   }
 
-  const outBuffer = new AudioBuffer({
-    numberOfChannels: numChannels,
-    length,
-    sampleRate: sourceBuffer.sampleRate,
-  });
-  for (let ch = 0; ch < numChannels; ch++) {
-    outBuffer.copyToChannel(new Float32Array(channels[ch]), ch);
-  }
+  const outRaw = createRawAudioData(channels, source.sampleRate);
 
   endTimer();
-  return { buffer: outBuffer, chainValid: true, noiseProfile };
+  return { raw: outRaw, chainValid: true, noiseProfile };
 }
 
-function copyBuffer(src: AudioBuffer): AudioBuffer {
-  const out = new AudioBuffer({
-    numberOfChannels: src.numberOfChannels,
-    length: src.length,
-    sampleRate: src.sampleRate,
+function copyRaw(src: RawAudioData): RawAudioData {
+  const channels = src.channels.map((ch) => {
+    const copy = new Float32Array(ch.length);
+    copy.set(ch);
+    return copy;
   });
-  for (let ch = 0; ch < src.numberOfChannels; ch++) {
-    out.copyToChannel(src.getChannelData(ch), ch);
-  }
-  return out;
+  return createRawAudioData(channels, src.sampleRate);
 }
 
 function yieldToEventLoop(): Promise<void> {

@@ -170,3 +170,42 @@ export interface StyleProfile {
   noiseTolerance: number; // 0-1 scale
   targetLufs: number;
 }
+
+// ── Worker-safe audio data (no AudioBuffer dependency) ────────
+
+export interface RawAudioData {
+  /** UUID for cache keying — thread-safe across workers/tabs */
+  id: string;
+  channels: Float32Array[];
+  sampleRate: number;
+  length: number;
+  numberOfChannels: number;
+}
+
+/**
+ * Factory for RawAudioData with validation.
+ * - Throws on channel length mismatch
+ * - Throws on zero-length or empty channels
+ */
+export function createRawAudioData(
+  channels: Float32Array[],
+  sampleRate: number
+): RawAudioData {
+  if (channels.length === 0) {
+    throw new Error("createRawAudioData: channels array is empty");
+  }
+  const length = channels[0].length;
+  if (length === 0) {
+    throw new Error("createRawAudioData: channel length is 0");
+  }
+  if (channels.some((ch) => ch.length !== length)) {
+    throw new Error("createRawAudioData: channel length mismatch across channels");
+  }
+  return {
+    id: crypto.randomUUID(),
+    channels,
+    sampleRate,
+    length,
+    numberOfChannels: channels.length,
+  };
+}

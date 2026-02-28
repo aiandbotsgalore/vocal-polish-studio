@@ -8,6 +8,7 @@
 
 import { getOrComputeAnalysis } from "./AnalysisCache";
 import { BANDS, type BandName } from "./frequencyBands";
+import type { RawAudioData } from "./types";
 
 export type IssueType = "plosive" | "sibilance" | "resonance" | "breath";
 
@@ -41,8 +42,8 @@ export interface IssueMapResult {
  * Analyze a buffer and return a timestamped issue map.
  * Leverages AnalysisCache to avoid redundant FFT computation.
  */
-export function generateIssueMap(buffer: AudioBuffer): IssueMapResult {
-  const analysis = getOrComputeAnalysis(buffer);
+export function generateIssueMap(raw: RawAudioData): IssueMapResult {
+  const analysis = getOrComputeAnalysis(raw);
   const { fftFrames, sampleRate, fftSize } = analysis;
   const hopSize = fftSize / 4;
   const freqPerBin = sampleRate / fftSize;

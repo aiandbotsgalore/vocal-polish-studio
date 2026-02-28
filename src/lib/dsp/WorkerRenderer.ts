@@ -1,10 +1,14 @@
 /**
  * WorkerRenderer — main-thread bridge to the DSP Web Worker.
  * Handles AudioBuffer ↔ Float32Array serialization, progress,
- * and cancellation. All heavy DSP runs off the main thread.
+ * cancellation, and worker crash cleanup.
+ *
+ * ⚠️  This file uses AudioBuffer — main-thread only.
+ * Imports audioBufferUtils from src/lib/audio/ (not src/lib/dsp/).
  */
 
 import type { ChainSlot, StyleProfile } from "./types";
+import { invalidateCache, flushCache } from "./AnalysisCache";
 import type { ScoringResult } from "./ScoringEngine";
 import type { SafetyReport } from "./SafetyRails";
 import type {
@@ -36,26 +40,36 @@ export interface WorkerAuditionResult {
 let worker: Worker | null = null;
 let requestId = 0;
 
+/** Track in-flight render IDs for crash cleanup */
+const inFlightIds = new Set<string>();
+
 function getWorker(): Worker {
   if (!worker) {
     worker = new Worker(new URL("@/workers/dspWorker.ts", import.meta.url), {
       type: "module",
     });
+    // Flush analysis cache on worker crash to clean up any in-flight entries
+    worker.onerror = () => {
+      for (const id of inFlightIds) {
+        invalidateCache(id);
+      }
+      inFlightIds.clear();
+    };
   }
   return worker;
 }
 
-/** Generate a unique request ID */
 function nextId(): string {
   return `req_${++requestId}_${Date.now()}`;
 }
 
-// ── Helpers ──────────────────────────────────────────────────
+// ── Helpers (main-thread only — uses AudioBuffer) ────────────
 
 function serializeBuffer(buf: AudioBuffer): { channels: Float32Array[]; sampleRate: number } {
   const channels: Float32Array[] = [];
   for (let ch = 0; ch < buf.numberOfChannels; ch++) {
     const src = buf.getChannelData(ch);
+    // Copy so main thread's AudioBuffer stays intact after transfer
     const copy = new Float32Array(src.length);
     copy.set(src);
     channels.push(copy);
@@ -78,10 +92,6 @@ function deserializeBuffer(channels: Float32Array[], sampleRate: number): AudioB
 
 // ── Public API ───────────────────────────────────────────────
 
-/**
- * Run auditionVariants in the Web Worker.
- * Returns the same shape as the original auditionVariants but without blocking the main thread.
- */
 export function workerAuditionVariants(
   sourceBuffer: AudioBuffer,
   variantSlots: ChainSlot[][],
@@ -92,10 +102,10 @@ export function workerAuditionVariants(
 ): Promise<WorkerAuditionResult> {
   const w = getWorker();
   const id = nextId();
+  inFlightIds.add(id);
   const { channels, sampleRate } = serializeBuffer(sourceBuffer);
 
   return new Promise<WorkerAuditionResult>((resolve, reject) => {
-    // Handle abort
     const onAbort = () => {
       w.postMessage({ type: "cancel", id } as WorkerRequest);
       cleanup();
@@ -104,6 +114,7 @@ export function workerAuditionVariants(
     signal?.addEventListener("abort", onAbort, { once: true });
 
     function cleanup() {
+      inFlightIds.delete(id);
       signal?.removeEventListener("abort", onAbort);
       w.removeEventListener("message", handler);
     }
@@ -156,10 +167,6 @@ export function workerAuditionVariants(
   });
 }
 
-/**
- * Run a single renderOffline in the Web Worker.
- * Used for slider override re-renders.
- */
 export function workerRenderOffline(
   sourceBuffer: AudioBuffer,
   slots: ChainSlot[],
@@ -167,6 +174,7 @@ export function workerRenderOffline(
 ): Promise<AudioBuffer> {
   const w = getWorker();
   const id = nextId();
+  inFlightIds.add(id);
   const { channels, sampleRate } = serializeBuffer(sourceBuffer);
 
   return new Promise<AudioBuffer>((resolve, reject) => {
@@ -178,6 +186,7 @@ export function workerRenderOffline(
     signal?.addEventListener("abort", onAbort, { once: true });
 
     function cleanup() {
+      inFlightIds.delete(id);
       signal?.removeEventListener("abort", onAbort);
       w.removeEventListener("message", handler);
     }
@@ -217,9 +226,15 @@ export function workerRenderOffline(
 
 /**
  * Terminate the worker (cleanup on unmount).
+ * Flushes analysis cache for any in-flight render IDs.
  */
 export function terminateDspWorker(): void {
   if (worker) {
+    // Clean up cache entries for in-flight renders
+    for (const id of inFlightIds) {
+      invalidateCache(id);
+    }
+    inFlightIds.clear();
     worker.terminate();
     worker = null;
   }
