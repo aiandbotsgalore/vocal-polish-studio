@@ -42,6 +42,8 @@ export function useAudioEngine() {
   const [currentVersionId, setCurrentVersionId] = useState<string | null>(null);
   const [postRenderScores, setPostRenderScores] = useState<Record<string, PostRenderScore>>({});
   const [feedbackHistory, setFeedbackHistory] = useState<FeedbackToken[]>([]);
+  /** Real progress percentage (0-100) for rendering */
+  const [renderProgress, setRenderProgress] = useState(0);
 
   const styleProfileRef = useRef<StyleProfile | undefined>(undefined);
   /** AbortController for cancelling in-flight processing */
@@ -147,6 +149,7 @@ export function useAudioEngine() {
     abortRef.current = new AbortController();
     const signal = abortRef.current.signal;
     setStatus("fixing");
+    setRenderProgress(0);
     const endFix = startTimer("autoFix-total");
 
     try {
@@ -165,6 +168,7 @@ export function useAudioEngine() {
 
       const auditionResult: AuditionResult = await auditionVariants(
         originalBuffer, variantSlots, targetLufs, profile,
+        (pct) => setRenderProgress(Math.round(pct * 100)),
       );
 
       if (signal.aborted) return;
@@ -207,7 +211,9 @@ export function useAudioEngine() {
       }
       console.error("[autoFix]", err);
       toast.error("Audio processing hit a snag. Try a different file or style target.");
+      // Error recovery: preserve gemini_ready state so user can retry
       setStatus("gemini_ready");
+      setRenderProgress(0);
     }
     endFix();
   }, [originalFile, originalBuffer, geminiDecision, mode, styleTarget, versions, analysis]);
@@ -287,7 +293,8 @@ export function useAudioEngine() {
       setStatus("ready");
     } catch {
       toast.error("Feedback revision didn't work. Give it another shot.");
-      setStatus("ready");
+      // Error recovery: preserve ready state + existing versions
+      setStatus(versions.length > 0 ? "ready" : "gemini_ready");
     }
   }, [originalFile, originalBuffer, analysis, geminiDecision, mode, styleTarget, versions]);
 
@@ -308,6 +315,7 @@ export function useAudioEngine() {
     clampsApplied, versions,
     currentVersionId, setCurrentVersionId, currentVersion,
     postRenderScores, feedbackHistory,
+    renderProgress,
     loadFile, analyze, autoFix, applyOverrides, sendFeedback, exportFile,
     cancelProcessing,
   };
