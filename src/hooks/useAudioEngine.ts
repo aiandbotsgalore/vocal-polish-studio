@@ -207,7 +207,7 @@ export function useAudioEngine() {
     if (!originalFile || !geminiDecision) return;
     try {
       const { decision: clamped } = applySafetyClamps(geminiDecision, mode);
-      const { blob, buffer } = await renderWithOverrides(originalFile, clamped, overrides);
+      const { blob, buffer } = await renderWithOverrides(originalFile, clamped, overrides, styleTarget);
       const url = URL.createObjectURL(blob);
 
       setVersions((prev) => {
@@ -222,7 +222,7 @@ export function useAudioEngine() {
     } catch {
       // silent — slider tweaks shouldn't throw errors at the user
     }
-  }, [originalFile, geminiDecision, mode, currentVersionId]);
+  }, [originalFile, geminiDecision, mode, styleTarget, currentVersionId]);
 
   const sendFeedback = useCallback(async (token: FeedbackToken) => {
     if (!originalFile || !analysis || !geminiDecision || !originalBuffer) return;

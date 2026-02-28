@@ -1,6 +1,6 @@
 import type { ProcessedVersion } from "@/types/gemini";
 import { Button } from "@/components/ui/button";
-import { History } from "lucide-react";
+import { History, Star, Shield } from "lucide-react";
 
 interface RevisionHistoryProps {
   versions: ProcessedVersion[];
@@ -10,6 +10,14 @@ interface RevisionHistoryProps {
 
 export function RevisionHistory({ versions, currentId, onSelect }: RevisionHistoryProps) {
   if (versions.length === 0) return null;
+
+  // Find best scoring version
+  const bestId = versions.reduce<string | null>((best, v) => {
+    if (!v.scoringResult) return best;
+    const bestVersion = versions.find((bv) => bv.id === best);
+    if (!bestVersion?.scoringResult) return v.id;
+    return v.scoringResult.overallScore > bestVersion.scoringResult.overallScore ? v.id : best;
+  }, null);
 
   return (
     <div className="rounded-lg panel-gradient p-4 studio-border space-y-2">
@@ -23,10 +31,21 @@ export function RevisionHistory({ versions, currentId, onSelect }: RevisionHisto
             key={v.id}
             variant={v.id === currentId ? "default" : "ghost"}
             size="sm"
-            className="w-full justify-start text-xs h-7"
+            className="w-full justify-between text-xs h-auto py-1.5 px-2"
             onClick={() => onSelect(v.id)}
           >
-            {v.label}
+            <span className="flex items-center gap-1.5 truncate">
+              {v.isSafeBaseline && <Shield className="h-3 w-3 shrink-0 text-muted-foreground" />}
+              {v.id === bestId && <Star className="h-3 w-3 shrink-0 text-primary" />}
+              <span className="truncate">{v.label}</span>
+            </span>
+            {v.scoringResult && (
+              <span className={`ml-2 font-mono text-[10px] shrink-0 ${
+                v.scoringResult.overallScore >= 70 ? "text-primary" : "text-muted-foreground"
+              }`}>
+                {v.scoringResult.overallScore}
+              </span>
+            )}
           </Button>
         ))}
       </div>
