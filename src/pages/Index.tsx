@@ -241,6 +241,7 @@ const Index = () => {
                 decision={currentVersion.decision}
                 clampsApplied={currentVersion.clampsApplied}
                 score={currentVersionId ? postRenderScores[currentVersionId] : undefined}
+                analysis={analysis}
               />
             )}
           </div>
