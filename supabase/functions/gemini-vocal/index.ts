@@ -14,6 +14,7 @@ const MAX_FILE_SIZE = 10_485_760; // 10 MiB — must match client
 const MIN_FILE_SIZE = 1_000;
 const MAX_ANALYSIS_SIZE = 200_000; // 200 KB in bytes
 const MAX_FEEDBACK_SIZE = 5_000;
+const MAX_HISTORY_CONTEXT_SIZE = 10_000;
 
 const PRIMARY_MODEL = "gemini-3.1-pro-preview";
 const FALLBACK_MODEL = "gemini-3-pro-preview";
@@ -322,6 +323,12 @@ serve(async (req) => {
       }
     }
 
+    // ── History context (preference summary from past sessions) ──
+    const historyContextRaw = form.get("historyContext");
+    const historyContext = (typeof historyContextRaw === "string" && historyContextRaw && 
+      new TextEncoder().encode(historyContextRaw).length <= MAX_HISTORY_CONTEXT_SIZE)
+      ? historyContextRaw : null;
+
     // ── MIME with extension fallback (handles empty type, octet-stream, empty name) ──
     let audioMimeType = (audioFile as File).type || "";
     const ext = ((audioFile as File).name || "").split(".").pop()?.toLowerCase() || "";
@@ -380,6 +387,9 @@ serve(async (req) => {
     }
     if (priorDecision) {
       promptText += `\n## Prior Decision (for reference)\n\`\`\`json\n${JSON.stringify(priorDecision, null, 2)}\n\`\`\`\n`;
+    }
+    if (historyContext) {
+      promptText += `\n${historyContext}\n\nUse this history to bias your decisions toward the user's demonstrated preferences. If the user frequently sends "too_sharp" feedback, reduce harshness/sibilance more aggressively. If they favor a particular style, lean into its characteristics.\n`;
     }
 
     // ── Build contents with file_data ──

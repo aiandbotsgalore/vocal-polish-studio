@@ -40,7 +40,8 @@ export async function callGemini(
   mode: ProcessingMode,
   styleTarget: StyleTarget,
   feedback?: FeedbackToken,
-  priorDecision?: GeminiDecision
+  priorDecision?: GeminiDecision,
+  historyContext?: string,
 ): Promise<GeminiCallResult> {
   try {
     // ── Env var guard ──
@@ -87,6 +88,9 @@ export async function callGemini(
     }
     if (priorDecision) {
       formData.append("priorDecision", JSON.stringify(priorDecision));
+    }
+    if (historyContext) {
+      formData.append("historyContext", historyContext);
     }
 
     // ── Send via fetch (no Content-Type — browser sets multipart boundary) ──
