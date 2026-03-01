@@ -14,7 +14,7 @@ import type {
 } from "@/types/gemini";
 import type { StyleProfile } from "@/lib/dsp/types";
 import { analyzeAudio } from "@/lib/audioAnalysis";
-import { callGemini, clearBase64Cache } from "@/lib/geminiClient";
+import { callGemini } from "@/lib/geminiClient";
 import { applySafetyClamps } from "@/lib/safetyClamps";
 import { renderWithOverrides } from "@/lib/dspEngine";
 import { validateRender } from "@/lib/postRenderValidation";
@@ -70,7 +70,7 @@ export function useAudioEngine() {
     if (abortRef.current) abortRef.current.abort();
     if (originalUrl) URL.revokeObjectURL(originalUrl);
     versions.forEach((v) => URL.revokeObjectURL(v.url));
-    clearBase64Cache();
+    // Base64 cache removed — binary transport now used
 
     setOriginalFile(file);
     setOriginalUrl(URL.createObjectURL(file));
