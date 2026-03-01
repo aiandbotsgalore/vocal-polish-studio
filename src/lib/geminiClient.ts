@@ -1,4 +1,3 @@
-import { supabase } from "@/integrations/supabase/client";
 import type {
   LayerOneAnalysis,
   GeminiDecision,
@@ -19,55 +18,19 @@ export interface GeminiCallResult {
 }
 
 // ── Constants ──
-const PROMPT_BUDGET = 50_000; // ~50 KB
-const MAX_REQUEST_SIZE = 50_000_000; // 50 MB — File API handles large uploads server-side
-const ALLOWED_MIME_TYPES = ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"];
-
-// ── Base64 cache ──
-const base64Cache = new Map<string, string>();
-
-export function clearBase64Cache() {
-  base64Cache.clear();
-}
-
-// FNV-1a hash for first chunk of file data
-function fnv1aHash(data: Uint8Array): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < data.length; i++) {
-    hash ^= data[i];
-    hash = (hash * 0x01000193) >>> 0;
-  }
-  return hash.toString(16);
-}
-
-async function getCacheKey(file: File): Promise<string> {
-  const chunk = new Uint8Array(await file.slice(0, 8192).arrayBuffer());
-  const shortHash = fnv1aHash(chunk);
-  return `${file.name}|${file.size}|${file.lastModified}|${shortHash}`;
-}
-
-async function fileToBase64(file: File): Promise<string> {
-  const key = await getCacheKey(file);
-  const cached = base64Cache.get(key);
-  if (cached) return cached;
-
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  const b64 = btoa(binary);
-  base64Cache.set(key, b64);
-  return b64;
-}
+const MAX_FILE_SIZE = 10_485_760; // 10 MiB
+const ALLOWED_MIME_TYPES = [
+  "audio/wav", "audio/x-wav",
+  "audio/mpeg", "audio/mp3",
+  "audio/mp4", "audio/x-m4a", "audio/m4a",
+];
 
 function getMimeType(file: File): string {
   if (file.type && ALLOWED_MIME_TYPES.includes(file.type)) return file.type;
-  // Infer from extension
   const ext = file.name.split(".").pop()?.toLowerCase();
   if (ext === "wav") return "audio/wav";
   if (ext === "mp3") return "audio/mpeg";
+  if (ext === "mp4" || ext === "m4a") return "audio/mp4";
   return file.type || "";
 }
 
@@ -80,49 +43,94 @@ export async function callGemini(
   priorDecision?: GeminiDecision
 ): Promise<GeminiCallResult> {
   try {
-    // MIME validation
-    const mimeType = getMimeType(file);
-    if (!ALLOWED_MIME_TYPES.includes(mimeType)) {
-      return {
-        error: {
-          error: "unsupported_format",
-          details: "Unsupported audio format. Upload WAV or MP3.",
-        },
-      };
-    }
-
-    // Size gate — single deterministic rule
-    const estimatedSize = file.size * 1.33 + PROMPT_BUDGET;
-    if (estimatedSize > MAX_REQUEST_SIZE) {
-      return {
-        error: {
-          error: "file_too_large",
-          details: "Audio too large for inline analysis. Please trim or convert.",
-        },
-      };
-    }
-
-    // Encode to base64 (cached)
-    const audioBase64 = await fileToBase64(file);
-
-    const { data, error } = await supabase.functions.invoke("gemini-vocal", {
-      body: {
-        analysis,
-        mode,
-        styleTarget,
-        feedback,
-        priorDecision,
-        audioBase64,
-        audioMimeType: mimeType,
-      },
-    });
-
-    if (error) {
-      const message = error.message || "Unknown edge function error";
+    // ── Env var guard ──
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+    const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+    if (!supabaseUrl || typeof supabaseUrl !== "string") {
       return {
         error: {
           error: "gemini_unavailable",
-          details: message,
+          details: "Backend URL not configured (VITE_SUPABASE_URL missing).",
+        },
+      };
+    }
+
+    // ── Client-side MIME pre-validation (relaxed: accept if extension fallback works) ──
+    const mimeType = getMimeType(file);
+    if (file.type && !ALLOWED_MIME_TYPES.includes(file.type) && !ALLOWED_MIME_TYPES.includes(mimeType)) {
+      return {
+        error: {
+          error: "unsupported_format",
+          details: "Unsupported audio format. Upload WAV, MP3, or M4A.",
+        },
+      };
+    }
+
+    // ── Size gate ──
+    if (file.size > MAX_FILE_SIZE) {
+      return {
+        error: {
+          error: "file_too_large",
+          details: "Audio exceeds 10 MiB limit. Please trim or convert.",
+        },
+      };
+    }
+
+    // ── Build FormData ──
+    const formData = new FormData();
+    formData.append("audio", file);
+    formData.append("analysis", JSON.stringify(analysis));
+    formData.append("mode", mode);
+    formData.append("styleTarget", styleTarget);
+    if (feedback) {
+      formData.append("feedback", feedback);
+    }
+    if (priorDecision) {
+      formData.append("priorDecision", JSON.stringify(priorDecision));
+    }
+
+    // ── Send via fetch (no Content-Type — browser sets multipart boundary) ──
+    const response = await fetch(`${supabaseUrl}/functions/v1/gemini-vocal`, {
+      method: "POST",
+      headers: {
+        apikey: supabaseKey || "",
+      },
+      body: formData,
+    });
+
+    // ── Handle non-200 ──
+    if (!response.ok) {
+      let errorBody: any;
+      try {
+        errorBody = await response.json();
+      } catch {
+        return {
+          error: {
+            error: "gemini_unavailable",
+            details: `Server error ${response.status}: ${response.statusText}`,
+          },
+        };
+      }
+      if (errorBody?.error) {
+        return { error: errorBody as GeminiError };
+      }
+      return {
+        error: {
+          error: "gemini_unavailable",
+          details: `Server error ${response.status}: ${response.statusText}`,
+        },
+      };
+    }
+
+    // ── Parse success response (with safety) ──
+    let data: any;
+    try {
+      data = await response.json();
+    } catch {
+      return {
+        error: {
+          error: "gemini_unavailable",
+          details: "Server returned malformed JSON on 200 OK.",
         },
       };
     }

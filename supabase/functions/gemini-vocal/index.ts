@@ -5,28 +5,40 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-const ALLOWED_MIME_TYPES = ["audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3"];
-const MIN_BASE64_LENGTH = 2000;
+const ALLOWED_MIME_TYPES = [
+  "audio/wav", "audio/x-wav",
+  "audio/mpeg", "audio/mp3",
+  "audio/mp4", "audio/x-m4a", "audio/m4a",
+];
+const MAX_FILE_SIZE = 10_485_760; // 10 MiB — must match client
+const MIN_FILE_SIZE = 1_000;
+const MAX_ANALYSIS_SIZE = 200_000; // 200 KB in bytes
+const MAX_FEEDBACK_SIZE = 5_000;
 
 const PRIMARY_MODEL = "gemini-3.1-pro-preview";
 const FALLBACK_MODEL = "gemini-3-pro-preview";
 const TIMEOUT_MS = 120_000;
 const FILE_API_BASE = "https://generativelanguage.googleapis.com";
 
+// ── Helpers ──
+
+function jsonError(
+  status: number,
+  body: { error: string; details: string; model?: string },
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
 // ── File API helpers ──
 
 async function uploadToFileApi(
   apiKey: string,
-  audioBase64: string,
+  bytes: Uint8Array,
   mimeType: string,
 ): Promise<{ fileUri: string; fileName: string }> {
-  // Base64 → binary
-  const binary = atob(audioBase64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-
   // Step 1: Start resumable upload
   const startRes = await fetch(
     `${FILE_API_BASE}/upload/v1beta/files?key=${apiKey}`,
@@ -80,13 +92,13 @@ async function uploadToFileApi(
     throw new Error(`File API returned unexpected shape: ${JSON.stringify(result).slice(0, 500)}`);
   }
 
-  console.log(`File uploaded: ${file.name}, uri: ${file.uri}`);
   return { fileUri: file.uri, fileName: file.name };
 }
 
 async function waitForFileActive(
   apiKey: string,
   fileName: string,
+  reqId: string,
 ): Promise<void> {
   const maxPolls = 15;
   const pollIntervalMs = 2000;
@@ -101,7 +113,7 @@ async function waitForFileActive(
     }
 
     const data = await res.json();
-    console.log(`File state poll ${i + 1}/${maxPolls}: ${data.state}`);
+    console.log(`[${reqId}] File state poll ${i + 1}/${maxPolls}: ${data.state}`);
 
     if (data.state === "ACTIVE") return;
     if (data.state === "FAILED") {
@@ -114,7 +126,7 @@ async function waitForFileActive(
   throw new Error(`File did not become ACTIVE after ${maxPolls * pollIntervalMs / 1000}s`);
 }
 
-async function deleteFile(apiKey: string, fileName: string): Promise<void> {
+async function deleteFile(apiKey: string, fileName: string, reqId: string): Promise<void> {
   try {
     const res = await fetch(
       `${FILE_API_BASE}/v1beta/${fileName}?key=${apiKey}`,
@@ -122,13 +134,13 @@ async function deleteFile(apiKey: string, fileName: string): Promise<void> {
     );
     if (!res.ok) {
       const errText = await res.text();
-      console.error(`File delete failed (${res.status}): ${errText}`);
+      console.error(`[${reqId}] File delete failed (${res.status}): ${errText}`);
     } else {
       await res.text(); // consume body
-      console.log(`File deleted: ${fileName}`);
+      console.log(`[${reqId}] File deleted: ${fileName}`);
     }
   } catch (e) {
-    console.error(`File delete error:`, e);
+    console.error(`[${reqId}] File delete error:`, e);
   }
 }
 
@@ -249,39 +261,108 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const reqId = crypto.randomUUID();
+
   try {
-    const { analysis, mode, styleTarget, feedback, priorDecision, audioBase64, audioMimeType } = await req.json();
+    // ── Parse multipart form data ──
+    let form: FormData;
+    try {
+      form = await req.formData();
+    } catch (e) {
+      console.error(`[${reqId}] formData parse error:`, e);
+      return jsonError(400, { error: "invalid_payload", details: "Failed to parse multipart request." });
+    }
 
     // ── API Key ──
     const apiKey = Deno.env.get("GOOGLE_API_KEY");
     if (!apiKey) {
-      return new Response(
-        JSON.stringify({ error: "gemini_unavailable", details: "GOOGLE_API_KEY not configured." }),
-        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      return jsonError(503, { error: "gemini_unavailable", details: "GOOGLE_API_KEY not configured." });
     }
 
-    // ── Validations ──
-    if (!audioBase64 || audioBase64.length < MIN_BASE64_LENGTH) {
-      return new Response(
-        JSON.stringify({ error: "invalid_payload", details: "Invalid audio payload received." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+    // ── Extract & validate audio file (capability check, not instanceof) ──
+    const audioFile = form.get("audio");
+    if (!audioFile || typeof (audioFile as any).arrayBuffer !== "function") {
+      return jsonError(400, { error: "invalid_payload", details: "Missing or invalid audio file." });
     }
+
+    // ── Extract & validate analysis ──
+    const analysisRaw = form.get("analysis");
+    if (!analysisRaw || typeof analysisRaw !== "string") {
+      return jsonError(400, { error: "invalid_payload", details: "Missing analysis data." });
+    }
+    if (new TextEncoder().encode(analysisRaw).length > MAX_ANALYSIS_SIZE) {
+      return jsonError(400, { error: "invalid_payload", details: "Analysis data too large." });
+    }
+    let analysis: any;
+    try {
+      analysis = JSON.parse(analysisRaw);
+    } catch {
+      return jsonError(400, { error: "invalid_payload", details: "Malformed analysis JSON." });
+    }
+
+    // ── Mode & styleTarget with typeof guard ──
+    const modeRaw = form.get("mode");
+    const mode = (typeof modeRaw === "string" && modeRaw) ? modeRaw : "safe";
+    const styleTargetRaw = form.get("styleTarget");
+    const styleTarget = (typeof styleTargetRaw === "string" && styleTargetRaw) ? styleTargetRaw : "natural";
+
+    // ── Feedback with size limit ──
+    const feedbackRaw = form.get("feedback");
+    const feedback = (typeof feedbackRaw === "string" && feedbackRaw && feedbackRaw.length <= MAX_FEEDBACK_SIZE)
+      ? feedbackRaw : null;
+
+    // ── priorDecision with safe parse ──
+    const priorDecisionRaw = form.get("priorDecision");
+    let priorDecision: any = null;
+    if (typeof priorDecisionRaw === "string" && priorDecisionRaw) {
+      try {
+        priorDecision = JSON.parse(priorDecisionRaw);
+      } catch {
+        return jsonError(400, { error: "invalid_payload", details: "Malformed priorDecision JSON." });
+      }
+    }
+
+    // ── MIME with extension fallback (handles empty type, octet-stream, empty name) ──
+    let audioMimeType = (audioFile as File).type || "";
+    const ext = ((audioFile as File).name || "").split(".").pop()?.toLowerCase() || "";
+
     if (!audioMimeType || !ALLOWED_MIME_TYPES.includes(audioMimeType)) {
-      return new Response(
-        JSON.stringify({ error: "unsupported_format", details: "Unsupported audio format. Upload WAV or MP3." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      const extMap: Record<string, string> = {
+        wav: "audio/wav", mp3: "audio/mpeg",
+        mp4: "audio/mp4", m4a: "audio/mp4",
+      };
+      audioMimeType = extMap[ext] || audioMimeType;
     }
+
+    if (!audioMimeType || !ALLOWED_MIME_TYPES.includes(audioMimeType)) {
+      return jsonError(400, { error: "unsupported_format", details: "Unsupported audio format. Upload WAV, MP3, or M4A." });
+    }
+
+    // ── Size validation ──
+    const fileSize = (audioFile as File).size;
+    if (fileSize > MAX_FILE_SIZE) {
+      return jsonError(400, { error: "file_too_large", details: "Audio exceeds 10 MiB limit." });
+    }
+    if (fileSize < MIN_FILE_SIZE) {
+      return jsonError(400, { error: "invalid_payload", details: "Audio file too small (< 1 KB)." });
+    }
+
+    // ── Bytes integrity check ──
+    const bytes = new Uint8Array(await (audioFile as File).arrayBuffer());
+    if (bytes.length !== fileSize || bytes.length < MIN_FILE_SIZE) {
+      return jsonError(400, { error: "invalid_payload", details: "Audio bytes do not match expected file size." });
+    }
+
+    // ── Request logging ──
+    console.log(`[${reqId}] Received: size=${fileSize} mime=${audioMimeType} mode=${mode} style=${styleTarget}`);
 
     // ── Upload to File API ──
-    console.log("Uploading audio to File API...");
-    const { fileUri, fileName } = await uploadToFileApi(apiKey, audioBase64, audioMimeType);
+    console.log(`[${reqId}] Uploading audio to File API...`);
+    const { fileUri, fileName } = await uploadToFileApi(apiKey, bytes, audioMimeType);
 
     // ── Wait for file to become ACTIVE ──
-    console.log("Waiting for file to become ACTIVE...");
-    await waitForFileActive(apiKey, fileName);
+    console.log(`[${reqId}] Waiting for file to become ACTIVE...`);
+    await waitForFileActive(apiKey, fileName, reqId);
 
     // ── Build prompt ──
     let promptText = `${SYSTEM_PROMPT}\n\n## Analysis Data\n\`\`\`json\n${JSON.stringify(analysis, null, 2)}\n\`\`\`\n\n`;
@@ -316,16 +397,16 @@ serve(async (req) => {
     let modelUsed = PRIMARY_MODEL;
 
     try {
-      console.log(`Attempting primary model: ${PRIMARY_MODEL}`);
+      console.log(`[${reqId}] Attempting primary model: ${PRIMARY_MODEL}`);
       let response: Response;
 
       try {
         response = await callGeminiNative(PRIMARY_MODEL, apiKey, contents);
       } catch (e) {
         if (e.name === "AbortError") {
-          console.error(`Primary model (${PRIMARY_MODEL}) timed out after ${TIMEOUT_MS}ms`);
+          console.error(`[${reqId}] Primary model (${PRIMARY_MODEL}) timed out after ${TIMEOUT_MS}ms`);
         } else {
-          console.error(`Primary model (${PRIMARY_MODEL}) fetch error:`, e);
+          console.error(`[${reqId}] Primary model (${PRIMARY_MODEL}) fetch error:`, e);
         }
         response = null as any;
       }
@@ -333,82 +414,64 @@ serve(async (req) => {
       if (!response || !response.ok) {
         if (response) {
           const errText = await response.text();
-          console.error(`Primary model (${PRIMARY_MODEL}) failed: ${response.status}`, errText);
+          console.error(`[${reqId}] Primary model (${PRIMARY_MODEL}) failed: ${response.status}`, errText);
         }
 
-        console.log(`Attempting fallback model: ${FALLBACK_MODEL}`);
+        console.log(`[${reqId}] Attempting fallback model: ${FALLBACK_MODEL}`);
         modelUsed = FALLBACK_MODEL;
         try {
           response = await callGeminiNative(FALLBACK_MODEL, apiKey, contents);
         } catch (e) {
           const reason = e.name === "AbortError" ? `timed out after ${TIMEOUT_MS}ms` : (e.message || "fetch error");
-          console.error(`Fallback model (${FALLBACK_MODEL}) failed:`, reason);
-          return new Response(
-            JSON.stringify({
-              error: "gemini_unavailable",
-              details: `Both models failed. Primary: ${PRIMARY_MODEL}, Fallback: ${FALLBACK_MODEL}. Last error: ${reason}`,
-              model: FALLBACK_MODEL,
-            }),
-            { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-          );
+          console.error(`[${reqId}] Fallback model (${FALLBACK_MODEL}) failed:`, reason);
+          return jsonError(503, {
+            error: "gemini_unavailable",
+            details: `Both models failed. Primary: ${PRIMARY_MODEL}, Fallback: ${FALLBACK_MODEL}. Last error: ${reason}`,
+            model: FALLBACK_MODEL,
+          });
         }
 
         if (!response.ok) {
           const errText = await response.text();
-          console.error(`Fallback model (${FALLBACK_MODEL}) failed: ${response.status}`, errText);
-          return new Response(
-            JSON.stringify({
-              error: "gemini_unavailable",
-              details: `Both models failed. Fallback (${FALLBACK_MODEL}) returned ${response.status}.`,
-              model: FALLBACK_MODEL,
-            }),
-            { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-          );
+          console.error(`[${reqId}] Fallback model (${FALLBACK_MODEL}) failed: ${response.status}`, errText);
+          return jsonError(503, {
+            error: "gemini_unavailable",
+            details: `Both models failed. Fallback (${FALLBACK_MODEL}) returned ${response.status}.`,
+            model: FALLBACK_MODEL,
+          });
         }
       }
 
-      console.log(`Model used: ${modelUsed}, status: ${response.status}`);
+      console.log(`[${reqId}] Model used: ${modelUsed}, status: ${response.status}`);
       const data = await response.json();
-      console.log("Gemini raw response:", JSON.stringify(data).slice(0, 2000));
+      console.log(`[${reqId}] Gemini raw response: ${JSON.stringify(data).slice(0, 2000)}`);
 
       // ── Parse response ──
       const parts = data.candidates?.[0]?.content?.parts || [];
       const fnPart = parts.find((p: any) => p.functionCall);
 
       if (!fnPart) {
-        console.error("No functionCall found in response parts:", JSON.stringify(parts).slice(0, 1000));
-        return new Response(
-          JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned an unexpected response format. No function call found.", model: modelUsed }),
-          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
+        console.error(`[${reqId}] No functionCall found in response parts:`, JSON.stringify(parts).slice(0, 1000));
+        return jsonError(503, { error: "gemini_unavailable", details: "Gemini returned an unexpected response format. No function call found.", model: modelUsed });
       }
 
       const decision = fnPart.functionCall.args;
       if (!decision || typeof decision !== "object") {
-        console.error("functionCall.args is empty or invalid:", JSON.stringify(fnPart).slice(0, 500));
-        return new Response(
-          JSON.stringify({ error: "gemini_unavailable", details: "Gemini returned empty function call arguments.", model: modelUsed }),
-          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
+        console.error(`[${reqId}] functionCall.args is empty or invalid:`, JSON.stringify(fnPart).slice(0, 500));
+        return jsonError(503, { error: "gemini_unavailable", details: "Gemini returned empty function call arguments.", model: modelUsed });
       }
 
       // ── Validate required fields ──
       const missingFields = REQUIRED_FIELDS.filter((f) => decision[f] === undefined || decision[f] === null);
       if (missingFields.length > 0) {
-        console.error("Missing required fields:", missingFields);
-        return new Response(
-          JSON.stringify({ error: "gemini_incomplete", details: `Gemini returned incomplete decision. Missing: ${missingFields.join(", ")}`, model: modelUsed }),
-          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
+        console.error(`[${reqId}] Missing required fields:`, missingFields);
+        return jsonError(503, { error: "gemini_incomplete", details: `Gemini returned incomplete decision. Missing: ${missingFields.join(", ")}`, model: modelUsed });
       }
 
       // ── audioReceived enforcement ──
       if (decision.audioReceived === false) {
-        console.error("Gemini reports audioReceived=false");
-        return new Response(
-          JSON.stringify({ error: "audio_not_received", details: "Gemini did not receive audio input. Analysis invalid.", model: modelUsed }),
-          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
+        console.error(`[${reqId}] Gemini reports audioReceived=false`);
+        return jsonError(503, { error: "audio_not_received", details: "Gemini did not receive audio input. Analysis invalid.", model: modelUsed });
       }
 
       return new Response(
@@ -417,13 +480,10 @@ serve(async (req) => {
       );
     } finally {
       // ── Cleanup: delete uploaded file ──
-      deleteFile(apiKey, fileName);
+      deleteFile(apiKey, fileName, reqId);
     }
   } catch (e) {
-    console.error("gemini-vocal error:", e);
-    return new Response(
-      JSON.stringify({ error: "gemini_unavailable", details: e instanceof Error ? e.message : "Unknown server error" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    console.error(`[${reqId}] gemini-vocal error:`, e);
+    return jsonError(500, { error: "gemini_unavailable", details: e instanceof Error ? e.message : "Unknown server error" });
   }
 });
