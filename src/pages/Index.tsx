@@ -10,6 +10,7 @@ import { StyleTargetSelector } from "@/components/StyleTargetSelector";
 import { AutonomyPanel } from "@/components/AutonomyPanel";
 import { FeedbackButtons } from "@/components/FeedbackButtons";
 import { RevisionHistory } from "@/components/RevisionHistory";
+import { SessionHistoryPanel } from "@/components/SessionHistoryPanel";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Activity, Sparkles, Download, AlertTriangle, XCircle } from "lucide-react";
@@ -47,6 +48,8 @@ const Index = () => {
     exportFile,
     cancelProcessing,
     renderProgress,
+    sessionSaveTrigger,
+    setPreferenceSummary,
   } = useAudioEngine();
 
   const busy = status === "analyzing" || status === "calling_gemini" || status === "fixing" || status === "validating";
@@ -254,6 +257,11 @@ const Index = () => {
                 onSelect={setCurrentVersionId}
               />
             )}
+
+            <SessionHistoryPanel
+              onPreferencesLoaded={setPreferenceSummary}
+              refreshTrigger={sessionSaveTrigger}
+            />
 
             {currentVersion && geminiDecision && (
               <Suspense fallback={<LazyFallback />}>

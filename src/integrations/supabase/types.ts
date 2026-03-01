@@ -14,7 +14,63 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      processing_sessions: {
+        Row: {
+          analysis: Json | null
+          clamps_applied: Json | null
+          created_at: string
+          duration_seconds: number | null
+          feedback_history: Json | null
+          file_name: string
+          file_size: number | null
+          final_score: number | null
+          gemini_decision: Json | null
+          id: string
+          mime_type: string | null
+          mode: string
+          model_used: string | null
+          scoring_metrics: Json | null
+          style_target: string
+          unified_report: string | null
+        }
+        Insert: {
+          analysis?: Json | null
+          clamps_applied?: Json | null
+          created_at?: string
+          duration_seconds?: number | null
+          feedback_history?: Json | null
+          file_name: string
+          file_size?: number | null
+          final_score?: number | null
+          gemini_decision?: Json | null
+          id?: string
+          mime_type?: string | null
+          mode?: string
+          model_used?: string | null
+          scoring_metrics?: Json | null
+          style_target?: string
+          unified_report?: string | null
+        }
+        Update: {
+          analysis?: Json | null
+          clamps_applied?: Json | null
+          created_at?: string
+          duration_seconds?: number | null
+          feedback_history?: Json | null
+          file_name?: string
+          file_size?: number | null
+          final_score?: number | null
+          gemini_decision?: Json | null
+          id?: string
+          mime_type?: string | null
+          mode?: string
+          model_used?: string | null
+          scoring_metrics?: Json | null
+          style_target?: string
+          unified_report?: string | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
