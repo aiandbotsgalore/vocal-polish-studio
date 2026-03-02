@@ -14,6 +14,7 @@ export const PLUGIN_ORDER = [
   "dePlosive",
   "resonanceSuppressor",
   "dynamicEQ",
+  "bodyEnhancer",
   "deEsser",
   "compressor",
   "limiter",
@@ -119,6 +120,13 @@ export interface PresenceShaperParams {
   Q: number; // 0.5 to 2
 }
 
+export interface BodyEnhancerParams {
+  frequencyHz: number; // 150 to 400 — low-shelf center
+  gainDb: number; // 0 to +8 — shelf boost amount
+  warmthDb: number; // 0 to +4 — secondary bell at ~300Hz
+  saturationAmount: number; // 0 to 1 — subtle density saturation
+}
+
 export interface HarmonicEnhancerParams {
   driveAmount: number; // 0 to 1
   mixPct: number; // 0 to 100
@@ -146,6 +154,7 @@ export type PluginParams = {
   dePlosive: DePlosiveParams;
   resonanceSuppressor: ResonanceSuppressorParams;
   dynamicEQ: DynamicEQParams;
+  bodyEnhancer: BodyEnhancerParams;
   deEsser: DeEsserParams;
   compressor: CompressorParams;
   limiter: LimiterParams;
