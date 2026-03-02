@@ -7,7 +7,6 @@ import type {
   LayerOneAnalysis,
   GeminiDecision,
   ProcessedVersion,
-  PostRenderScore,
   FeedbackToken,
   GeminiError,
   SliderOverrides,
@@ -17,7 +16,6 @@ import { analyzeAudio } from "@/lib/audioAnalysis";
 import { callGemini } from "@/lib/geminiClient";
 import { applySafetyClamps } from "@/lib/safetyClamps";
 import { renderWithOverrides } from "@/lib/dspEngine";
-import { validateRender } from "@/lib/postRenderValidation";
 import { workerAuditionVariants, type WorkerAuditionResult } from "@/lib/dsp/WorkerRenderer";
 import { decisionToSlots } from "@/lib/dsp/decisionToSlots";
 import { exportToWav, downloadWav } from "@/lib/dsp/WavExporter";
@@ -41,7 +39,6 @@ export function useAudioEngine() {
   const [clampsApplied, setClampsApplied] = useState<string[]>([]);
   const [versions, setVersions] = useState<ProcessedVersion[]>([]);
   const [currentVersionId, setCurrentVersionId] = useState<string | null>(null);
-  const [postRenderScores, setPostRenderScores] = useState<Record<string, PostRenderScore>>({});
   const [feedbackHistory, setFeedbackHistory] = useState<FeedbackToken[]>([]);
   const [renderProgress, setRenderProgress] = useState(0);
   /** Increments to trigger history panel refresh */
@@ -90,7 +87,6 @@ export function useAudioEngine() {
     setClampsApplied([]);
     setVersions([]);
     setCurrentVersionId(null);
-    setPostRenderScores({});
     setFeedbackHistory([]);
     styleProfileRef.current = undefined;
     sessionIdRef.current = null;
@@ -204,24 +200,11 @@ export function useAudioEngine() {
       setVersions((prev) => [...prev, ...newVersions]);
       const recommendedVersion = newVersions[auditionResult.recommendedIndex];
       setCurrentVersionId(recommendedVersion?.id ?? newVersions[0]?.id ?? null);
-      setStatus("playback_ready");
-      toast.success(`${newVersions.length} variants rendered — "${recommendedVersion?.label}" recommended (score: ${recommendedVersion?.scoringResult?.overallScore ?? "?"})`);
 
-      setStatus("validating");
-      let finalScore: number | undefined;
-      let scoringMetrics: Record<string, number> | undefined;
-      if (recommendedVersion) {
-        try {
-          const score = await validateRender(analysis!, recommendedVersion.buffer, recommendedVersion.id, clamped.eqBellCenterHz);
-          setPostRenderScores((prev) => ({ ...prev, [recommendedVersion.id]: score }));
-          finalScore = score.overallScore;
-          scoringMetrics = {
-            sibilanceReduction: score.sibilanceReduction,
-            harshnessReduction: score.harshnessReduction,
-            brightnessPreservation: score.brightnessPreservation,
-          };
-        } catch { /* non-critical */ }
-      }
+      const finalScore = recommendedVersion?.scoringResult?.overallScore;
+      const scoringMetrics = recommendedVersion?.scoringResult?.metrics
+        ? { ...recommendedVersion.scoringResult.metrics }
+        : undefined;
 
       // ── Persist session ──
       const sid = await saveSession({
@@ -243,6 +226,7 @@ export function useAudioEngine() {
       setSessionSaveTrigger((n) => n + 1);
 
       setStatus("ready");
+      toast.success(`${newVersions.length} variants rendered — "${recommendedVersion?.label}" recommended (score: ${finalScore ?? "?"})`);
     } catch (err) {
       if ((err as Error)?.name === "AbortError") {
         setStatus("gemini_ready");
@@ -323,16 +307,9 @@ export function useAudioEngine() {
 
       setVersions((prev) => [...prev, newVersion]);
       setCurrentVersionId(versionId);
-      setStatus("playback_ready");
       toast.success(`${label} rendered (score: ${best.score.overallScore})`);
 
-      setStatus("validating");
-      let finalScore: number | undefined;
-      try {
-        const score = await validateRender(analysis, best.buffer, versionId, clamped.eqBellCenterHz);
-        setPostRenderScores((prev) => ({ ...prev, [versionId]: score }));
-        finalScore = score.overallScore;
-      } catch { /* non-critical */ }
+      const finalScore = best.score.overallScore;
 
       // ── Update persisted session with feedback ──
       if (sessionIdRef.current) {
@@ -367,7 +344,7 @@ export function useAudioEngine() {
     geminiDecision, modelUsed, geminiError,
     clampsApplied, versions,
     currentVersionId, setCurrentVersionId, currentVersion,
-    postRenderScores, feedbackHistory,
+    feedbackHistory,
     renderProgress,
     loadFile, analyze, autoFix, applyOverrides, sendFeedback, exportFile,
     cancelProcessing,

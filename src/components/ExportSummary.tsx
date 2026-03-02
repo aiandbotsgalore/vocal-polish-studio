@@ -1,11 +1,13 @@
 import { useState } from "react";
-import type { GeminiDecision, ProcessingMode, StyleTarget, PostRenderScore, LayerOneAnalysis } from "@/types/gemini";
+import type { GeminiDecision, ProcessingMode, StyleTarget, LayerOneAnalysis } from "@/types/gemini";
+import type { ScoringResult } from "@/lib/dsp/ScoringEngine";
+import type { BandName } from "@/lib/dsp/frequencyBands";
 import { STYLE_LABELS } from "@/types/gemini";
 import { decisionToSlots } from "@/lib/dsp/decisionToSlots";
 import { getStyleProfile } from "@/lib/dsp/StyleProfiles";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Button } from "@/components/ui/button";
-import { ChevronDown, ChevronRight, Download, FileText, Layers, ArrowRightLeft } from "lucide-react";
+import { ChevronDown, ChevronRight, FileText, Layers, ArrowRightLeft } from "lucide-react";
 
 interface ExportSummaryProps {
   mode: ProcessingMode;
@@ -13,7 +15,7 @@ interface ExportSummaryProps {
   modelUsed: string;
   decision: GeminiDecision;
   clampsApplied: string[];
-  score?: PostRenderScore;
+  scoringResult?: ScoringResult;
   analysis?: LayerOneAnalysis | null;
 }
 
@@ -26,6 +28,7 @@ const PLUGIN_NAMES: Record<string, string> = {
   dePlosive: "De-Plosive",
   resonanceSuppressor: "Resonance Suppressor",
   dynamicEQ: "Dynamic EQ",
+  bodyEnhancer: "Body Enhancer",
   deEsser: "De-Esser",
   compressor: "Compressor",
   limiter: "Limiter",
@@ -35,29 +38,42 @@ const PLUGIN_NAMES: Record<string, string> = {
   outputStage: "Output Stage",
 };
 
-function MetricRow({ label, before, after, unit = "" }: { label: string; before: string | number; after: string | number; unit?: string }) {
-  const bVal = typeof before === "number" ? before : parseFloat(before);
-  const aVal = typeof after === "number" ? after : parseFloat(after);
-  const delta = isNaN(bVal) || isNaN(aVal) ? null : aVal - bVal;
+const BAND_LABELS: Record<BandName, string> = {
+  rumble: "Rumble", plosive: "Plosive", mud: "Mud/Body",
+  lowMid: "Low-Mid", presence: "Presence", harshness: "Harshness",
+  sibilance: "Sibilance", air: "Air",
+};
+
+function BandRow({ label, beforeDb, afterDb }: { label: string; beforeDb: number; afterDb: number }) {
+  const delta = Math.round((afterDb - beforeDb) * 10) / 10;
+  const deltaColor = delta < -1 ? "text-primary" : delta > 1 ? "text-accent" : "text-muted-foreground";
   return (
-    <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-3 items-center text-xs font-mono">
+    <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-x-2 items-center text-[10px] font-mono">
       <span className="text-muted-foreground truncate">{label}</span>
-      <span className="text-secondary-foreground text-right w-16">{before}{unit}</span>
-      <span className="text-muted-foreground text-center w-6">→</span>
-      <span className="text-foreground font-semibold text-right w-16">
-        {after}{unit}
-        {delta !== null && (
-          <span className={`ml-1 text-[10px] ${delta < 0 ? "text-primary" : delta > 0 ? "text-accent" : "text-muted-foreground"}`}>
-            ({delta > 0 ? "+" : ""}{delta.toFixed(1)})
-          </span>
-        )}
+      <span className="text-secondary-foreground text-right w-10">{beforeDb.toFixed(1)}</span>
+      <span className="text-muted-foreground text-center w-4">→</span>
+      <span className="text-foreground font-semibold text-right w-10">{afterDb.toFixed(1)}</span>
+      <span className={`text-right w-14 ${deltaColor}`}>
+        {delta > 0 ? "+" : ""}{delta.toFixed(1)} dB
+      </span>
+    </div>
+  );
+}
+
+function MetricRow({ label, value }: { label: string; value: number }) {
+  const pct = Math.round(value * 100);
+  return (
+    <div className="flex justify-between text-[10px] font-mono">
+      <span className="text-muted-foreground">{label}</span>
+      <span className={`font-semibold ${pct >= 70 ? "text-primary" : pct >= 40 ? "text-accent" : "text-destructive"}`}>
+        {pct}%
       </span>
     </div>
   );
 }
 
 function buildReport(props: ExportSummaryProps) {
-  const { mode, styleTarget, modelUsed, decision, clampsApplied, score, analysis } = props;
+  const { mode, styleTarget, modelUsed, decision, clampsApplied, scoringResult, analysis } = props;
   const profile = getStyleProfile(styleTarget);
   const slots = decisionToSlots(decision, profile.targetLufs);
 
@@ -75,11 +91,6 @@ function buildReport(props: ExportSummaryProps) {
       eqBell: { centerHz: decision.eqBellCenterHz, Q: decision.eqBellQ, cutDb: decision.eqBellCutDb },
       deEss: { mode: decision.deEssMode, centerHz: decision.deEssCenterHz, reductionDb: decision.deEssReductionDb },
       outputTrimDb: decision.outputTrimDb,
-      ...(decision.optionalSecondEqBellCenterHz && {
-        secondEqBell: { centerHz: decision.optionalSecondEqBellCenterHz, Q: decision.optionalSecondEqBellQ, cutDb: decision.optionalSecondEqBellCutDb },
-      }),
-      ...(decision.optionalHighShelfCutDb && { highShelfCutDb: decision.optionalHighShelfCutDb }),
-      ...(decision.optionalPresenceCompensationDb && { presenceCompensationDb: decision.optionalPresenceCompensationDb }),
     },
     chain: slots.map(s => ({ plugin: s.id, bypass: s.bypass, params: s.params })),
     clampsApplied,
@@ -87,26 +98,23 @@ function buildReport(props: ExportSummaryProps) {
       beforeMetrics: {
         peakLevel: analysis.peakLevel,
         rmsLoudness: analysis.rmsLoudness,
-        globalHarshness: analysis.globalHarshness,
-        globalSibilance: analysis.globalSibilance,
-        voiceBrightness: analysis.voiceBrightness,
         durationSeconds: analysis.durationSeconds,
       },
     }),
-    ...(score && {
-      afterMetrics: {
-        overallScore: score.overallScore,
-        harshnessReduction: score.harshnessReduction,
-        sibilanceReduction: score.sibilanceReduction,
-        brightnessPreservation: score.brightnessPreservation,
-        artifactRisk: score.artifactRiskEstimate,
-        targetedBandDeltaDb: score.targetedBandDeltaDb,
+    ...(scoringResult && {
+      scoring: {
+        overallScore: scoringResult.overallScore,
+        processedLufs: scoringResult.processedLufs,
+        originalLufs: scoringResult.originalLufs,
+        metrics: scoringResult.metrics,
+        bandEnergiesDb: scoringResult.bandEnergiesDb,
+        referenceDeviation: scoringResult.referenceDeviation,
       },
     }),
   };
 }
 
-export function ExportSummary({ mode, styleTarget, modelUsed, decision, clampsApplied, score, analysis }: ExportSummaryProps) {
+export function ExportSummary({ mode, styleTarget, modelUsed, decision, clampsApplied, scoringResult, analysis }: ExportSummaryProps) {
   const [chainOpen, setChainOpen] = useState(false);
   const [metricsOpen, setMetricsOpen] = useState(false);
 
@@ -115,7 +123,7 @@ export function ExportSummary({ mode, styleTarget, modelUsed, decision, clampsAp
   const activePlugins = slots.filter(s => !s.bypass);
 
   const downloadReport = () => {
-    const report = buildReport({ mode, styleTarget, modelUsed, decision, clampsApplied, score, analysis });
+    const report = buildReport({ mode, styleTarget, modelUsed, decision, clampsApplied, scoringResult, analysis });
     const json = JSON.stringify(report, null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -144,6 +152,14 @@ export function ExportSummary({ mode, styleTarget, modelUsed, decision, clampsAp
         <span className="text-muted-foreground">Target:</span><span>{profile.targetLufs} LUFS</span>
         <span className="text-muted-foreground">Strategy:</span><span>{decision.strategy}</span>
         <span className="text-muted-foreground">Plugins:</span><span>{activePlugins.length}/{slots.length} active</span>
+        {scoringResult && (
+          <>
+            <span className="text-muted-foreground">Score:</span>
+            <span className={scoringResult.overallScore >= 70 ? "text-primary font-bold" : "text-accent font-bold"}>
+              {scoringResult.overallScore}/100
+            </span>
+          </>
+        )}
       </div>
 
       {/* Processing chain */}
@@ -187,13 +203,18 @@ export function ExportSummary({ mode, styleTarget, modelUsed, decision, clampsAp
                   {(slot.params as any).ratio}:1
                 </span>
               )}
+              {!slot.bypass && slot.id === "bodyEnhancer" && (
+                <span className="text-[9px] text-muted-foreground ml-auto">
+                  +{(slot.params as any).gainDb}dB @{(slot.params as any).frequencyHz}Hz
+                </span>
+              )}
             </div>
           ))}
         </CollapsibleContent>
       </Collapsible>
 
-      {/* Before/After metrics */}
-      {analysis && score && (
+      {/* Before/After band energies */}
+      {scoringResult?.bandEnergiesDb && (
         <Collapsible open={metricsOpen} onOpenChange={setMetricsOpen}>
           <CollapsibleTrigger className="flex items-center gap-1.5 w-full text-left group">
             {metricsOpen ? <ChevronDown className="h-3 w-3 text-muted-foreground" /> : <ChevronRight className="h-3 w-3 text-muted-foreground" />}
@@ -202,15 +223,36 @@ export function ExportSummary({ mode, styleTarget, modelUsed, decision, clampsAp
               Before / After
             </span>
           </CollapsibleTrigger>
-          <CollapsibleContent className="mt-2 space-y-1.5">
-            <MetricRow label="Harshness" before={analysis.globalHarshness} after={Math.round(analysis.globalHarshness * (1 - score.harshnessReduction / 100))} unit="/100" />
-            <MetricRow label="Sibilance" before={analysis.globalSibilance} after={Math.round(analysis.globalSibilance * (1 - score.sibilanceReduction / 100))} unit="/100" />
-            <MetricRow label="Brightness" before={`${analysis.voiceBrightness}%`} after={`${score.brightnessPreservation}%`} />
+          <CollapsibleContent className="mt-2 space-y-2">
+            {/* Band energies */}
+            <div className="space-y-1">
+              {(Object.keys(scoringResult.bandEnergiesDb.original) as BandName[]).map((band) => (
+                <BandRow
+                  key={band}
+                  label={BAND_LABELS[band]}
+                  beforeDb={scoringResult.bandEnergiesDb.original[band]}
+                  afterDb={scoringResult.bandEnergiesDb.processed[band]}
+                />
+              ))}
+            </div>
+
+            {/* Normalized metrics */}
+            <div className="pt-2 border-t border-border/50 space-y-1">
+              <MetricRow label="LUFS Accuracy" value={scoringResult.metrics.lufsAccuracy} />
+              <MetricRow label="Harshness ↓" value={scoringResult.metrics.harshnessReduction} />
+              <MetricRow label="Sibilance ↓" value={scoringResult.metrics.sibilanceReduction} />
+              <MetricRow label="Brightness" value={scoringResult.metrics.brightnessPreservation} />
+              <MetricRow label="Body & Warmth" value={scoringResult.metrics.bodyWarmth} />
+              <MetricRow label="Harmonic Density" value={scoringResult.metrics.harmonicDensity} />
+              <MetricRow label="Dynamic Range" value={scoringResult.metrics.dynamicRange} />
+              <MetricRow label="Artifact Safety" value={scoringResult.metrics.artifactRisk} />
+            </div>
+
             <div className="pt-1 border-t border-border/50">
               <div className="flex justify-between items-center">
                 <span className="text-muted-foreground">Overall Score</span>
-                <span className={`text-sm font-bold ${score.overallScore >= 70 ? "text-primary" : "text-accent"}`}>
-                  {score.overallScore}/100
+                <span className={`text-sm font-bold ${scoringResult.overallScore >= 70 ? "text-primary" : "text-accent"}`}>
+                  {scoringResult.overallScore}/100
                 </span>
               </div>
             </div>

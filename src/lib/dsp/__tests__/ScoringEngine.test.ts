@@ -10,8 +10,8 @@ vi.mock("../AnalysisCache", () => ({
       return {
         fftFrames: [],
         bandEnergies: {
-          rumble: -60, plosive: -50, mud: -35,
-          lowMid: -20, presence: -18, harshness: -28,
+          rumble: -60, plosive: -50, mud: -32,
+          lowMid: -18, presence: -18, harshness: -28,
           sibilance: -30, air: -40,
         },
         spectralCentroid: 2500,
@@ -105,6 +105,11 @@ describe("ScoringEngine", () => {
     expect(result.processedLufs).toBeCloseTo(-16.2);
   });
 
+  it("returns originalLufs", () => {
+    const result = scoreProcessedAudio(original, processed, -16);
+    expect(result.originalLufs).toBeCloseTo(-16.2);
+  });
+
   it("referenceDeviation is defined when profile provided", () => {
     const result = scoreProcessedAudio(original, processed, -16, testProfile);
     expect(result.referenceDeviation).toBeDefined();
@@ -114,5 +119,32 @@ describe("ScoringEngine", () => {
   it("works without a style profile", () => {
     const result = scoreProcessedAudio(original, processed, -16);
     expect(result.overallScore).toBeGreaterThanOrEqual(0);
+  });
+
+  it("includes band energies in dB for both original and processed", () => {
+    const result = scoreProcessedAudio(original, processed, -16, testProfile);
+    expect(result.bandEnergiesDb).toBeDefined();
+    expect(result.bandEnergiesDb.original.harshness).toBeDefined();
+    expect(result.bandEnergiesDb.processed.harshness).toBeDefined();
+    // Processed harshness should be lower (more negative) than original
+    expect(result.bandEnergiesDb.processed.harshness).toBeLessThan(result.bandEnergiesDb.original.harshness);
+  });
+
+  it("body warmth metric reflects low-mid improvement", () => {
+    const result = scoreProcessedAudio(original, processed, -16);
+    // Processed has more mud energy (-32 vs -34), so body warmth should be >= 0.5
+    expect(result.metrics.bodyWarmth).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it("harmonic density metric is normalized 0-1", () => {
+    const result = scoreProcessedAudio(original, processed, -16);
+    expect(result.metrics.harmonicDensity).toBeGreaterThanOrEqual(0);
+    expect(result.metrics.harmonicDensity).toBeLessThanOrEqual(1);
+  });
+
+  it("dynamic range metric is normalized 0-1", () => {
+    const result = scoreProcessedAudio(original, processed, -16);
+    expect(result.metrics.dynamicRange).toBeGreaterThanOrEqual(0);
+    expect(result.metrics.dynamicRange).toBeLessThanOrEqual(1);
   });
 });

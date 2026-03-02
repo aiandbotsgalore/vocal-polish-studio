@@ -1,6 +1,8 @@
 import { useState } from "react";
-import type { LayerOneAnalysis, GeminiDecision, PostRenderScore, GeminiError } from "@/types/gemini";
-import { AlertTriangle, CheckCircle, Info, Brain, BarChart3, Shield, Sparkles, Activity, ChevronDown, ChevronRight, Headphones, AlertCircle } from "lucide-react";
+import type { LayerOneAnalysis, GeminiDecision, GeminiError } from "@/types/gemini";
+import type { ScoringResult } from "@/lib/dsp/ScoringEngine";
+import type { BandName } from "@/lib/dsp/frequencyBands";
+import { AlertTriangle, CheckCircle, Info, Brain, BarChart3, Shield, Sparkles, Activity, ChevronDown, ChevronRight, Headphones, AlertCircle, TrendingUp } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 
@@ -8,7 +10,7 @@ interface AnalysisReportProps {
   analysis?: LayerOneAnalysis;
   decision?: GeminiDecision;
   clampsApplied?: string[];
-  postRenderScore?: PostRenderScore;
+  scoringResult?: ScoringResult;
   preferredVersion?: string;
   geminiError?: GeminiError | null;
   modelUsed?: string;
@@ -30,6 +32,22 @@ function ScoreBar({ label, value, max = 100 }: { label: string; value: number; m
   );
 }
 
+function MetricBar({ label, value, suffix = "" }: { label: string; value: number; suffix?: string }) {
+  const pct = Math.round(value * 100);
+  const color = pct >= 70 ? "bg-primary" : pct >= 40 ? "bg-accent" : "bg-destructive";
+  return (
+    <div className="space-y-1">
+      <div className="flex justify-between text-[10px]">
+        <span className="text-muted-foreground">{label}</span>
+        <span className="font-mono font-semibold text-foreground">{pct}%{suffix}</span>
+      </div>
+      <div className="h-1.5 w-full rounded-full bg-secondary">
+        <div className={`h-full rounded-full transition-all duration-500 ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
 function Section({ icon: Icon, title, children }: { icon: typeof Info; title: string; children: React.ReactNode }) {
   return (
     <div className="space-y-2">
@@ -38,6 +56,28 @@ function Section({ icon: Icon, title, children }: { icon: typeof Info; title: st
         <h4 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{title}</h4>
       </div>
       {children}
+    </div>
+  );
+}
+
+const BAND_LABELS: Record<BandName, string> = {
+  rumble: "Rumble", plosive: "Plosive", mud: "Mud/Body",
+  lowMid: "Low-Mid", presence: "Presence", harshness: "Harshness",
+  sibilance: "Sibilance", air: "Air",
+};
+
+function BandEnergyRow({ band, beforeDb, afterDb }: { band: BandName; beforeDb: number; afterDb: number }) {
+  const delta = Math.round((afterDb - beforeDb) * 10) / 10;
+  const deltaColor = delta < -1 ? "text-primary" : delta > 1 ? "text-accent" : "text-muted-foreground";
+  return (
+    <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-x-2 items-center text-[10px] font-mono">
+      <span className="text-muted-foreground">{BAND_LABELS[band]}</span>
+      <span className="text-secondary-foreground text-right w-12">{beforeDb.toFixed(1)}</span>
+      <span className="text-muted-foreground text-center w-4">→</span>
+      <span className="text-foreground font-semibold text-right w-12">{afterDb.toFixed(1)}</span>
+      <span className={`text-right w-12 ${deltaColor}`}>
+        {delta > 0 ? "+" : ""}{delta.toFixed(1)} dB
+      </span>
     </div>
   );
 }
@@ -116,8 +156,9 @@ function IssueHeatmap({ analysis }: { analysis: LayerOneAnalysis }) {
   );
 }
 
-export function AnalysisReport({ analysis, decision, clampsApplied, postRenderScore, preferredVersion, geminiError, modelUsed }: AnalysisReportProps) {
+export function AnalysisReport({ analysis, decision, clampsApplied, scoringResult, preferredVersion, geminiError, modelUsed }: AnalysisReportProps) {
   const [rawMetricsOpen, setRawMetricsOpen] = useState(false);
+  const [bandDetailsOpen, setBandDetailsOpen] = useState(false);
   const severity = decision?.severity || analysis?.harshnessSeverity || "low";
   const SeverityIcon = severity === "high" ? AlertTriangle : severity === "moderate" ? Info : CheckCircle;
   const severityColor = severity === "high" ? "text-destructive" : severity === "moderate" ? "text-accent" : "text-primary";
@@ -176,6 +217,86 @@ export function AnalysisReport({ analysis, decision, clampsApplied, postRenderSc
           <div className="rounded-md bg-secondary/30 p-3">
             <p className="text-xs leading-relaxed text-secondary-foreground whitespace-pre-line">{decision.unifiedReport}</p>
           </div>
+        </Section>
+      )}
+
+      {/* Post-Render Scoring (from ScoringEngine) */}
+      {scoringResult && (
+        <Section icon={TrendingUp} title="Processing Results">
+          <div className="grid grid-cols-2 gap-2">
+            <div className="rounded-md bg-secondary/50 p-3 col-span-2">
+              <div className="flex items-center justify-between">
+                <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Overall Score</p>
+                <p className={`font-mono text-2xl font-bold ${
+                  scoringResult.overallScore >= 70 ? "text-primary" :
+                  scoringResult.overallScore >= 40 ? "text-accent" : "text-destructive"
+                }`}>
+                  {scoringResult.overallScore}<span className="text-sm text-muted-foreground">/100</span>
+                </p>
+              </div>
+            </div>
+            <div className="rounded-md bg-secondary/50 p-2">
+              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Processed LUFS</p>
+              <p className="font-mono text-sm font-semibold text-foreground">
+                {isFinite(scoringResult.processedLufs) ? scoringResult.processedLufs.toFixed(1) : "—"}
+                <span className="text-[10px] text-muted-foreground"> LUFS</span>
+              </p>
+            </div>
+            <div className="rounded-md bg-secondary/50 p-2">
+              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Original LUFS</p>
+              <p className="font-mono text-sm font-semibold text-foreground">
+                {isFinite(scoringResult.originalLufs) ? scoringResult.originalLufs.toFixed(1) : "—"}
+                <span className="text-[10px] text-muted-foreground"> LUFS</span>
+              </p>
+            </div>
+          </div>
+
+          {/* Metric bars */}
+          <div className="space-y-2 mt-3">
+            <MetricBar label="LUFS Accuracy" value={scoringResult.metrics.lufsAccuracy} />
+            <MetricBar label="Spectral Balance" value={scoringResult.metrics.spectralBalance} />
+            <MetricBar label="Harshness Reduction" value={scoringResult.metrics.harshnessReduction} />
+            <MetricBar label="Sibilance Reduction" value={scoringResult.metrics.sibilanceReduction} />
+            <MetricBar label="Brightness Preservation" value={scoringResult.metrics.brightnessPreservation} />
+            <MetricBar label="Artifact Safety" value={scoringResult.metrics.artifactRisk} />
+            <MetricBar label="Body & Warmth" value={scoringResult.metrics.bodyWarmth} />
+            <MetricBar label="Harmonic Density" value={scoringResult.metrics.harmonicDensity} />
+            <MetricBar label="Dynamic Range" value={scoringResult.metrics.dynamicRange} />
+          </div>
+
+          {/* Band energy comparison — collapsible */}
+          {scoringResult.bandEnergiesDb && (
+            <Collapsible open={bandDetailsOpen} onOpenChange={setBandDetailsOpen}>
+              <CollapsibleTrigger className="flex items-center gap-2 w-full text-left group mt-3">
+                {bandDetailsOpen ? <ChevronDown className="h-3 w-3 text-muted-foreground" /> : <ChevronRight className="h-3 w-3 text-muted-foreground" />}
+                <Activity className="h-3 w-3 text-muted-foreground" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground group-hover:text-foreground transition-colors">
+                  Band Energy Comparison (dB)
+                </span>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="mt-2 space-y-1 rounded-md bg-secondary/30 p-3">
+                <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-x-2 items-center text-[9px] font-mono text-muted-foreground mb-1">
+                  <span>Band</span>
+                  <span className="text-right w-12">Before</span>
+                  <span className="text-center w-4" />
+                  <span className="text-right w-12">After</span>
+                  <span className="text-right w-12">Δ</span>
+                </div>
+                {(Object.keys(scoringResult.bandEnergiesDb.original) as BandName[]).map((band) => (
+                  <BandEnergyRow
+                    key={band}
+                    band={band}
+                    beforeDb={scoringResult.bandEnergiesDb.original[band]}
+                    afterDb={scoringResult.bandEnergiesDb.processed[band]}
+                  />
+                ))}
+              </CollapsibleContent>
+            </Collapsible>
+          )}
+
+          {preferredVersion && (
+            <p className="text-xs text-primary mt-2">AI Preferred: <span className="font-semibold">{preferredVersion}</span></p>
+          )}
         </Section>
       )}
 
@@ -263,46 +384,6 @@ export function AnalysisReport({ analysis, decision, clampsApplied, postRenderSc
               ))}
             </ul>
           </div>
-        </Section>
-      )}
-
-      {/* Post-Render Results */}
-      {postRenderScore && (
-        <Section icon={BarChart3} title="Post-Render Results">
-          <div className="grid grid-cols-2 gap-2">
-            <div className="rounded-md bg-secondary/50 p-2">
-              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Overall Score</p>
-              <p className="font-mono text-lg font-semibold text-primary">{postRenderScore.overallScore}<span className="text-xs text-muted-foreground">/100</span></p>
-            </div>
-            <div className="rounded-md bg-secondary/50 p-2">
-              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Artifact Risk</p>
-              <p className="font-mono text-sm font-semibold text-foreground capitalize">{postRenderScore.artifactRiskEstimate}</p>
-            </div>
-            <div className="rounded-md bg-secondary/50 p-2">
-              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Harshness ↓</p>
-              <p className="font-mono text-sm font-semibold text-foreground">{postRenderScore.harshnessReduction}%</p>
-            </div>
-            <div className="rounded-md bg-secondary/50 p-2">
-              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Sibilance ↓</p>
-              <p className="font-mono text-sm font-semibold text-foreground">{postRenderScore.sibilanceReduction}%</p>
-            </div>
-          </div>
-          {/* Band energy delta warning */}
-          {postRenderScore.targetedBandDeltaDb !== undefined && Math.abs(postRenderScore.targetedBandDeltaDb) < 0.2 && (
-            <div className="mt-2 rounded-md border border-accent/30 bg-accent/5 p-2 flex items-start gap-2">
-              <AlertCircle className="h-3.5 w-3.5 text-accent mt-0.5 shrink-0" />
-              <p className="text-[10px] text-accent">Processing produced negligible audible change. DSP may not have applied.</p>
-            </div>
-          )}
-          {postRenderScore.targetedBandDeltaDb !== undefined && Math.abs(postRenderScore.targetedBandDeltaDb) >= 0.2 && (
-            <div className="mt-2 rounded-md bg-secondary/50 p-2">
-              <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Band Delta</p>
-              <p className="font-mono text-sm font-semibold text-foreground">{postRenderScore.targetedBandDeltaDb}<span className="text-[10px] text-muted-foreground"> dB</span></p>
-            </div>
-          )}
-          {preferredVersion && (
-            <p className="text-xs text-primary mt-2">AI Preferred: <span className="font-semibold">{preferredVersion}</span></p>
-          )}
         </Section>
       )}
     </div>
