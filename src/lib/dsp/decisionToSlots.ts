@@ -1,15 +1,15 @@
 /**
  * decisionToSlots — converts a GeminiDecision into a ChainSlot[] for the modular DSP pipeline.
  *
- * Maps the high-level EQ/de-ess/output parameters from Gemini into
- * the fixed 14-plugin chain slot configuration.
+ * Maps the high-level EQ/de-ess/output parameters AND additive body/harmonic
+ * parameters from Gemini into the fixed 15-plugin chain slot configuration.
  */
 
 import type { GeminiDecision } from "@/types/gemini";
 import type { ChainSlot } from "./types";
 
 /**
- * Convert a GeminiDecision into a full 14-slot ChainSlot array.
+ * Convert a GeminiDecision into a full 15-slot ChainSlot array.
  * Unmapped plugins are bypassed with sensible defaults.
  */
 export function decisionToSlots(
@@ -29,6 +29,18 @@ export function decisionToSlots(
   const hasPresenceComp =
     decision.optionalPresenceCompensationDb != null &&
     decision.optionalPresenceCompensationDb > 0;
+
+  // Additive: body enhancement
+  const hasBody =
+    (decision.bodyBoostDb != null && decision.bodyBoostDb > 0) ||
+    (decision.warmthDb != null && decision.warmthDb > 0);
+
+  // Additive: harmonic saturation
+  const hasHarmonics =
+    decision.harmonicDriveAmount != null &&
+    decision.harmonicDriveAmount > 0 &&
+    decision.harmonicMixPct != null &&
+    decision.harmonicMixPct > 0;
 
   // Build DynamicEQ bands from the decision's EQ parameters
   const dynBands: Array<{
@@ -115,6 +127,16 @@ export function decisionToSlots(
       params: { bands: hasDynEq ? dynBands : [] },
     },
     {
+      id: "bodyEnhancer",
+      bypass: !hasBody,
+      params: {
+        frequencyHz: decision.bodyFrequencyHz ?? 250,
+        gainDb: hasBody ? (decision.bodyBoostDb ?? 0) : 0,
+        warmthDb: hasBody ? (decision.warmthDb ?? 0) : 0,
+        saturationAmount: hasBody ? (decision.bodySaturation ?? 0) : 0,
+      },
+    },
+    {
       id: "deEsser",
       bypass: decision.deEssReductionDb === 0,
       params: {
@@ -152,8 +174,12 @@ export function decisionToSlots(
     },
     {
       id: "harmonicEnhancer",
-      bypass: true,
-      params: { driveAmount: 0, mixPct: 0, toneHz: 3000 },
+      bypass: !hasHarmonics,
+      params: {
+        driveAmount: hasHarmonics ? decision.harmonicDriveAmount! : 0,
+        mixPct: hasHarmonics ? decision.harmonicMixPct! : 0,
+        toneHz: decision.harmonicToneHz ?? 3000,
+      },
     },
     {
       id: "gainRider",

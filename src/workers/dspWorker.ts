@@ -86,6 +86,7 @@ function buildSafeBaselineSlots(targetLufs: number): ChainSlot[] {
     { id: "dePlosive", bypass: true, params: { sensitivityDb: -10, frequencyHz: 120 } },
     { id: "resonanceSuppressor", bypass: false, params: { maxNotches: 2, maxCutDb: -3, persistenceFrames: 8 } },
     { id: "dynamicEQ", bypass: false, params: { bands: [{ frequencyHz: 250, Q: 1.2, thresholdDb: -30, maxCutDb: -3, attackMs: 10, releaseMs: 100 }] } },
+    { id: "bodyEnhancer", bypass: true, params: { frequencyHz: 250, gainDb: 0, warmthDb: 0, saturationAmount: 0 } },
     { id: "deEsser", bypass: false, params: { frequencyHz: 6500, thresholdDb: -25, maxReductionDb: -3, Q: 2 } },
     { id: "compressor", bypass: false, params: { thresholdDb: -20, ratio: 2, attackMs: 10, releaseMs: 100, kneeDb: 6, makeupGainDb: 2 } },
     { id: "limiter", bypass: false, params: { ceilingDb: -1, releaseMs: 50, lookaheadMs: 1, oversample: false } },

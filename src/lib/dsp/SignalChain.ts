@@ -21,6 +21,7 @@ import { NoiseGate } from "./plugins/NoiseGate";
 import { DePlosive } from "./plugins/DePlosive";
 import { ResonanceSuppressor } from "./plugins/ResonanceSuppressor";
 import { DynamicEQ } from "./plugins/DynamicEQ";
+import { BodyEnhancer } from "./plugins/BodyEnhancer";
 import { DeEsser } from "./plugins/DeEsser";
 import { Compressor } from "./plugins/Compressor";
 import { Limiter } from "./plugins/Limiter";
@@ -39,6 +40,7 @@ function createPlugin(id: PluginId): Plugin<any> {
     case "dePlosive": return new DePlosive();
     case "resonanceSuppressor": return new ResonanceSuppressor();
     case "dynamicEQ": return new DynamicEQ();
+    case "bodyEnhancer": return new BodyEnhancer();
     case "deEsser": return new DeEsser();
     case "compressor": return new Compressor();
     case "limiter": return new Limiter();

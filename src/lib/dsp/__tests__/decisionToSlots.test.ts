@@ -29,10 +29,10 @@ function makeDecision(overrides: Partial<GeminiDecision> = {}): GeminiDecision {
 }
 
 describe("decisionToSlots", () => {
-  it("returns exactly 14 slots in PLUGIN_ORDER", () => {
+  it("returns exactly 15 slots in PLUGIN_ORDER", () => {
     const slots = decisionToSlots(makeDecision(), -16);
-    expect(slots).toHaveLength(14);
-    for (let i = 0; i < 14; i++) {
+    expect(slots).toHaveLength(15);
+    for (let i = 0; i < 15; i++) {
       expect(slots[i].id).toBe(PLUGIN_ORDER[i]);
     }
   });
@@ -107,5 +107,33 @@ describe("decisionToSlots", () => {
     const slots = decisionToSlots(makeDecision(), -16);
     expect(slots.find((s) => s.id === "compressor")!.bypass).toBe(false);
     expect(slots.find((s) => s.id === "limiter")!.bypass).toBe(false);
+  });
+
+  it("enables bodyEnhancer when bodyBoostDb > 0", () => {
+    const slots = decisionToSlots(
+      makeDecision({ bodyBoostDb: 4, bodyFrequencyHz: 250, warmthDb: 2, bodySaturation: 0.3 }),
+      -16
+    );
+    const body = slots.find((s) => s.id === "bodyEnhancer")!;
+    expect(body.bypass).toBe(false);
+    expect((body.params as any).gainDb).toBe(4);
+    expect((body.params as any).warmthDb).toBe(2);
+  });
+
+  it("bypasses bodyEnhancer when no body params", () => {
+    const slots = decisionToSlots(makeDecision(), -16);
+    const body = slots.find((s) => s.id === "bodyEnhancer")!;
+    expect(body.bypass).toBe(true);
+  });
+
+  it("enables harmonicEnhancer when drive and mix are set", () => {
+    const slots = decisionToSlots(
+      makeDecision({ harmonicDriveAmount: 0.3, harmonicMixPct: 25, harmonicToneHz: 4000 }),
+      -16
+    );
+    const harm = slots.find((s) => s.id === "harmonicEnhancer")!;
+    expect(harm.bypass).toBe(false);
+    expect((harm.params as any).driveAmount).toBe(0.3);
+    expect((harm.params as any).mixPct).toBe(25);
   });
 });

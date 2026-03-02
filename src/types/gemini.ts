@@ -82,7 +82,7 @@ export interface GeminiDecision {
   passCount: number;
   tradeoffPriority: string;
   artifactRiskPrediction: string;
-  // EQ
+  // EQ (subtractive)
   eqBellCenterHz: number;
   eqBellQ: number;
   eqBellCutDb: number;
@@ -97,6 +97,15 @@ export interface GeminiDecision {
   deEssReductionDb: number;
   // Output
   outputTrimDb: number;
+  // ── Additive: Body Enhancement ──
+  bodyBoostDb?: number; // 0 to +8 — low-shelf boost for body/warmth
+  bodyFrequencyHz?: number; // 150 to 400 — shelf center
+  warmthDb?: number; // 0 to +4 — secondary warmth bell at ~300Hz
+  bodySaturation?: number; // 0 to 1 — subtle density saturation
+  // ── Additive: Harmonic Saturation ──
+  harmonicDriveAmount?: number; // 0 to 1 — saturation drive
+  harmonicMixPct?: number; // 0 to 100 — wet/dry mix
+  harmonicToneHz?: number; // 1000 to 8000 — tone filter cutoff
   // Alternate
   alternateDecision?: GeminiDecision;
 }

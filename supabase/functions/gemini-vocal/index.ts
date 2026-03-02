@@ -156,21 +156,32 @@ Return unifiedReport as a cohesive narrative that weaves numeric metrics with au
 Explain what you intentionally did NOT change and why.
 If safety clamps will apply, mention the tradeoff in unifiedReport.
 
+YOUR GOAL: Transform vocals from ANY quality level into professional-grade output. You have BOTH subtractive (EQ cuts, de-essing) AND additive (body boost, warmth, harmonic saturation) tools. USE THEM.
+
+ADDITIVE PROCESSING GUIDELINES:
+- If the vocal sounds THIN or BRITTLE: prescribe bodyBoostDb (2-6 dB low-shelf at 200-350Hz) and warmthDb (1-3 dB bell at 300Hz)
+- If the vocal lacks DENSITY or FULLNESS: prescribe bodySaturation (0.2-0.6) for subtle harmonic density
+- If the vocal sounds FLAT or LIFELESS: prescribe harmonicDriveAmount (0.2-0.5) with harmonicMixPct (15-40%)
+- If the vocal is already warm and full: set all additive params to 0
+- ALWAYS assess whether additive processing is needed — don't skip it by default
+
 CONFLICT RESOLUTION POLICY (in priority order):
 1. Safety and artifact prevention — always highest priority
 2. Severe harshness or sibilance findings override style target preferences
-3. Style target influences decisions only within safe and severity-aware limits
-4. Confidence score controls aggressiveness — low confidence biases toward conservative settings
+3. Additive corrections (body, warmth, density) when source is thin/brittle
+4. Style target influences decisions only within safe and severity-aware limits
+5. Confidence score controls aggressiveness — low confidence biases toward conservative settings
 
 REASONING REQUIREMENTS:
 - Be specific: reference actual measurement values from the analysis
 - Explain WHY you chose each parameter value
 - State what tradeoff you prioritized and why
-- Never use generic phrases like "improved clarity" or "applied enhancements"`;
+- Never use generic phrases like "improved clarity" or "applied enhancements"
+- If prescribing additive processing, explain what was missing in the source`;
 
 const TOOL_SCHEMA = {
   name: "vocal_decision",
-  description: "Return the complete vocal processing decision with unified report. ALL fields must be populated.",
+  description: "Return the complete vocal processing decision with unified report. ALL fields must be populated. Use additive parameters (body, warmth, harmonics) when the source vocal is thin, brittle, or lacking fullness.",
   parameters: {
     type: "OBJECT",
     properties: {
@@ -181,7 +192,7 @@ const TOOL_SCHEMA = {
       confidence: { type: "NUMBER", description: "0-100 confidence in this decision" },
       styleTarget: { type: "STRING", description: "The style target applied" },
       styleInterpretation: { type: "STRING", description: "How the style target influenced the decision" },
-      strategy: { type: "STRING", description: "One of: de_ess_focused, eq_focused, balanced, minimal_intervention, multi_pass" },
+      strategy: { type: "STRING", description: "One of: de_ess_focused, eq_focused, balanced, minimal_intervention, multi_pass, additive_corrective" },
       processingOrder: { type: "STRING", description: "Order of processing steps applied" },
       passCount: { type: "NUMBER", description: "Number of processing passes: 1 or 2" },
       tradeoffPriority: { type: "STRING", description: "What was prioritized" },
@@ -198,6 +209,15 @@ const TOOL_SCHEMA = {
       optionalSecondEqBellCutDb: { type: "NUMBER", description: "Optional 2nd EQ cut dB, 0 if not used" },
       optionalHighShelfCutDb: { type: "NUMBER", description: "Optional high shelf cut dB, 0 if not used" },
       optionalPresenceCompensationDb: { type: "NUMBER", description: "Optional presence compensation dB, 0 if not used" },
+      // ── Additive: Body Enhancement ──
+      bodyBoostDb: { type: "NUMBER", description: "Low-shelf boost in dB (0-8) to add body/warmth to thin vocals. 0 = no boost. Use 2-6 for thin/brittle sources." },
+      bodyFrequencyHz: { type: "NUMBER", description: "Low-shelf center frequency (150-400 Hz). Default 250. Lower = more sub-bass, higher = more chest." },
+      warmthDb: { type: "NUMBER", description: "Secondary warmth bell boost at ~300Hz (0-4 dB). Fills out mid-body. 0 = off." },
+      bodySaturation: { type: "NUMBER", description: "Subtle saturation amount (0-1) for density. 0 = clean, 0.3-0.5 = warm density. Use when vocal lacks fullness." },
+      // ── Additive: Harmonic Saturation ──
+      harmonicDriveAmount: { type: "NUMBER", description: "Harmonic saturation drive (0-1). 0 = off, 0.2-0.5 = subtle warmth, >0.5 = aggressive color." },
+      harmonicMixPct: { type: "NUMBER", description: "Wet/dry mix for harmonics (0-100%). 0 = off, 15-40% = typical use." },
+      harmonicToneHz: { type: "NUMBER", description: "Tone filter cutoff for harmonics (1000-8000 Hz). Controls which harmonics pass through." },
     },
     required: [
       "unifiedReport", "audioReceived", "issueProfile", "severity", "confidence",
@@ -205,6 +225,8 @@ const TOOL_SCHEMA = {
       "tradeoffPriority", "artifactRiskPrediction",
       "eqBellCenterHz", "eqBellQ", "eqBellCutDb",
       "deEssMode", "deEssCenterHz", "deEssReductionDb", "outputTrimDb",
+      "bodyBoostDb", "bodyFrequencyHz", "warmthDb", "bodySaturation",
+      "harmonicDriveAmount", "harmonicMixPct", "harmonicToneHz",
     ],
   },
 };
