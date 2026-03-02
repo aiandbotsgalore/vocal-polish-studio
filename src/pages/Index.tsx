@@ -38,7 +38,6 @@ const Index = () => {
     versions,
     currentVersionId, setCurrentVersionId,
     currentVersion,
-    postRenderScores,
     loadFile,
     analyze,
     autoFix,
@@ -169,7 +168,7 @@ const Index = () => {
                 analysis={analysis || undefined}
                 decision={geminiDecision || undefined}
                 clampsApplied={clampsApplied}
-                postRenderScore={currentVersionId ? postRenderScores[currentVersionId] : undefined}
+                scoringResult={currentVersion?.scoringResult}
                 geminiError={geminiError}
                 modelUsed={modelUsed}
               />
@@ -206,11 +205,13 @@ const Index = () => {
               </div>
             )}
 
-            {/* A/B Toggle Player */}
+            {/* A/B Toggle Player — loudness matched */}
             <ABTogglePlayer
               originalUrl={originalUrl}
               processedUrl={currentVersion?.url ?? null}
               processedLabel={currentVersion?.label}
+              originalBuffer={originalBuffer}
+              processedBuffer={currentVersion?.buffer}
             />
 
             {/* Lazy-loaded waveform */}
@@ -271,7 +272,7 @@ const Index = () => {
                   modelUsed={modelUsed}
                   decision={currentVersion.decision}
                   clampsApplied={currentVersion.clampsApplied}
-                  score={currentVersionId ? postRenderScores[currentVersionId] : undefined}
+                  scoringResult={currentVersion.scoringResult}
                   analysis={analysis}
                 />
               </Suspense>
